@@ -131,6 +131,9 @@ function displayPointCloud(data) {
     const { positions, pointCount, bounds } = data;
     console.log('displayPointCloud: received', pointCount, 'points,', positions.byteLength, 'bytes');
 
+    // Track if this is the first load (to reset camera)
+    const isFirstLoad = pointCloud === null;
+
     // Remove existing point cloud
     if (pointCloud) {
         scene.remove(pointCloud);
@@ -142,19 +145,37 @@ function displayPointCloud(data) {
     // Create point cloud geometry
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+    // Create checkerboard pattern colors for better surface visualization
+    const colors = new Float32Array(pointCount * 3);
+    const color1 = new THREE.Color(0x00ffff); // Cyan
+    const color2 = new THREE.Color(0x00cccc); // Slightly darker cyan
+
+    for (let i = 0; i < pointCount; i++) {
+        // Checkerboard based on position in array
+        const x = Math.floor(positions[i * 3] / STEP_SIZE);
+        const y = Math.floor(positions[i * 3 + 1] / STEP_SIZE);
+        const isEven = (x + y) % 2 === 0;
+        const color = isEven ? color1 : color2;
+
+        colors[i * 3] = color.r;
+        colors[i * 3 + 1] = color.g;
+        colors[i * 3 + 2] = color.b;
+    }
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
     const geomTime = performance.now() - geomStart;
     console.log('displayPointCloud: geometry creation took', geomTime.toFixed(2), 'ms');
 
-    // Calculate adaptive point size based on mesh density
-    // More points = smaller point size for better visual quality
-    const baseSize = 0.2;
-    const pointSize = Math.max(0.03, baseSize * Math.pow(100000 / pointCount, 0.3));
-    console.log('displayPointCloud: point size', pointSize.toFixed(3));
+    // Calculate point size proportional to step size (raster density)
+    // Point size should match or slightly exceed step size for complete coverage
+    const pointSize = STEP_SIZE * 1.1; // 10% larger than step for slight overlap
+    console.log('displayPointCloud: point size', pointSize.toFixed(3), 'mm (step:', STEP_SIZE, 'mm)');
 
-    // Create point cloud material
+    // Create point cloud material with vertex colors
     const material = new THREE.PointsMaterial({
         size: pointSize,
-        color: 0x00ffff,
+        vertexColors: true,
         sizeAttenuation: true
     });
 
@@ -171,27 +192,29 @@ function displayPointCloud(data) {
     boundsEl.textContent = `${formatBounds(bounds.min)} to ${formatBounds(bounds.max)}`;
     infoPanel.classList.remove('hidden');
 
-    // Center camera on the model
-    const center = new THREE.Vector3(
-        (bounds.min.x + bounds.max.x) / 2,
-        (bounds.min.y + bounds.max.y) / 2,
-        (bounds.min.z + bounds.max.z) / 2
-    );
+    // Only reset camera on first load
+    if (isFirstLoad) {
+        const center = new THREE.Vector3(
+            (bounds.min.x + bounds.max.x) / 2,
+            (bounds.min.y + bounds.max.y) / 2,
+            (bounds.min.z + bounds.max.z) / 2
+        );
 
-    const size = Math.max(
-        bounds.max.x - bounds.min.x,
-        bounds.max.y - bounds.min.y,
-        bounds.max.z - bounds.min.z
-    );
+        const size = Math.max(
+            bounds.max.x - bounds.min.x,
+            bounds.max.y - bounds.min.y,
+            bounds.max.z - bounds.min.z
+        );
 
-    camera.position.set(
-        center.x + size,
-        center.y + size,
-        center.z + size
-    );
+        camera.position.set(
+            center.x + size,
+            center.y + size,
+            center.z + size
+        );
 
-    controls.target.copy(center);
-    controls.update();
+        controls.target.copy(center);
+        controls.update();
+    }
 
     const renderTotal = performance.now() - renderStart;
     console.log('displayPointCloud: TOTAL render creation took', renderTotal.toFixed(2), 'ms');
