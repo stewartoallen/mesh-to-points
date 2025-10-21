@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>STL to Point Mesh Converter</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="container">
+        <div id="drop-zone" class="drop-zone">
+            <div class="drop-zone-content">
+                <p class="drop-zone-text">Drag & Drop STL file here</p>
+                <p class="drop-zone-subtext">or click to browse</p>
+                <input type="file" id="file-input" accept=".stl" hidden>
+            </div>
+        </div>
+
+        <div id="info" class="info hidden">
+            <div class="info-item">
+                <span class="info-label">Status:</span>
+                <span id="status" class="info-value">Ready</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Points:</span>
+                <span id="point-count" class="info-value">0</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Bounds:</span>
+                <span id="bounds" class="info-value">-</span>
+            </div>
+        </div>
+
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script type="module" src="app.js"></script>
+</body>
+</html>
