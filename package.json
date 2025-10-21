@@ -1,0 +1,33 @@
+{
+  "name": "stl-to-mesh",
+  "version": "1.2.0",
+  "description": "STL to Point Mesh converter using WebAssembly and Three.js",
+  "type": "module",
+  "scripts": {
+    "clean": "rm -rf build/ test-converter test-converter-new test-v*",
+    "prebuild": "npm run clean && mkdir -p build",
+    "build:wasm": "emcc src/wasm/mesh-converter.c -o build/mesh-converter.wasm -s WASM=1 -s STANDALONE_WASM -s EXPORTED_FUNCTIONS='[\"_convert_to_point_mesh\",\"_get_bounds\",\"_free_output\",\"_malloc\",\"_free\",\"_test_triangle_data\"]' -s ALLOW_MEMORY_GROWTH=1 -O3 --no-entry",
+    "build:web": "cp src/web/* build/",
+    "build": "npm run build:wasm && npm run build:web",
+    "test:native": "gcc -I src/wasm src/test/test-converter-new.c src/wasm/mesh-converter-lib.c -o test-converter-new -lm -O2 && ./test-converter-new benchmark/fixtures/inner.stl 0.1",
+    "test:wasm": "npm run build:wasm && node src/test/test-wasm.cjs",
+    "test": "npm run test:native && npm run test:wasm",
+    "validate": "bash benchmark/validate-optimizations.sh",
+    "dev": "npm run build && npx serve build",
+    "serve": "npx serve build"
+  },
+  "keywords": [
+    "stl",
+    "point-cloud",
+    "mesh",
+    "webassembly",
+    "wasm",
+    "threejs",
+    "3d"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "serve": "^14.2.1"
+  }
+}

@@ -1,0 +1,27 @@
+# Build artifacts
+build/
+*.wasm
+
+# Compiled test binaries
+test-converter
+test-converter-new
+test-v*
+
+# Node modules
+node_modules/
+package-lock.json
+
+# OS files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Logs
+*.log
+npm-debug.log*

@@ -5,8 +5,8 @@ const path = require('path');
 async function testWasm() {
     console.log('Loading WASM module...');
 
-    // Load WASM file
-    const wasmPath = path.join(__dirname, 'mesh-converter.wasm');
+    // Load WASM file from build directory
+    const wasmPath = path.join(__dirname, '../../build/mesh-converter.wasm');
     const wasmBuffer = fs.readFileSync(wasmPath);
 
     // Import object (let WASM create its own memory)
@@ -39,9 +39,9 @@ async function testWasm() {
     console.log('WASM module loaded successfully!');
     console.log('Available exports:', Object.keys(exports));
 
-    // Load STL file
+    // Load STL file from benchmark fixtures
     console.log('\nLoading STL file: inner.stl');
-    const stlBuffer = fs.readFileSync(path.join(__dirname, 'inner.stl'));
+    const stlBuffer = fs.readFileSync(path.join(__dirname, '../../benchmark/fixtures/inner.stl'));
     const stlView = new DataView(stlBuffer.buffer, stlBuffer.byteOffset, stlBuffer.byteLength);
 
     // Parse binary STL

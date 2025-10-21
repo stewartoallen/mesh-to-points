@@ -8,7 +8,7 @@ echo "Optimization Validation Test"
 echo "======================================"
 echo ""
 
-STL_FILE="inner.stl"
+STL_FILE="benchmark/fixtures/inner.stl"
 STEP_SIZE="0.1"
 
 echo "Test file: $STL_FILE"
@@ -17,8 +17,8 @@ echo ""
 
 # Compile all versions
 echo "Compiling all versions..."
-gcc test-converter-new.c mesh-converter-lib-v1.0-backface.c -o test-v1.0 -lm -O2
-gcc test-converter-new.c mesh-converter-lib-v1.2-xy-grid.c -o test-v1.2 -lm -O2
+gcc src/test/test-converter-new.c benchmark/versions/mesh-converter-lib-v1.0-backface.c -o test-v1.0 -lm -O2
+gcc src/test/test-converter-new.c benchmark/versions/mesh-converter-lib-v1.2-xy-grid.c -o test-v1.2 -lm -O2
 echo "✓ Compilation successful"
 echo ""
 

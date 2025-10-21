@@ -54,6 +54,7 @@ body {
     width: 180px;
     height: 80px;
     border-width: 2px;
+    padding: 10px 20px 10px 20px;
 }
 
 .drop-zone.minimized .drop-zone-subtext {
@@ -62,6 +63,7 @@ body {
 
 .drop-zone.minimized .drop-zone-text {
     font-size: 14px;
+    margin: 0;
 }
 
 .drop-zone:hover {
