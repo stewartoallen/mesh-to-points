@@ -2,12 +2,13 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // Configuration
-const STEP_SIZE = 0.5; // mm (balance between detail and performance)
+let STEP_SIZE = 0.1; // mm (default, can be changed via dropdown)
 
 // DOM elements
 const canvas = document.getElementById('canvas');
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
+const stepSizeSelect = document.getElementById('step-size-select');
 const infoPanel = document.getElementById('info');
 const statusEl = document.getElementById('status');
 const pointCountEl = document.getElementById('point-count');
@@ -60,6 +61,12 @@ function initScene() {
 
     // Window resize handler
     window.addEventListener('resize', onWindowResize);
+
+    // Step size dropdown handler
+    stepSizeSelect.addEventListener('change', (e) => {
+        STEP_SIZE = parseFloat(e.target.value);
+        console.log('Step size changed to:', STEP_SIZE, 'mm');
+    });
 
     // Start render loop
     animate();
@@ -138,15 +145,25 @@ function displayPointCloud(data) {
     const geomTime = performance.now() - geomStart;
     console.log('displayPointCloud: geometry creation took', geomTime.toFixed(2), 'ms');
 
+    // Calculate adaptive point size based on mesh density
+    // More points = smaller point size for better visual quality
+    const baseSize = 0.2;
+    const pointSize = Math.max(0.03, baseSize * Math.pow(100000 / pointCount, 0.3));
+    console.log('displayPointCloud: point size', pointSize.toFixed(3));
+
     // Create point cloud material
     const material = new THREE.PointsMaterial({
-        size: 0.5,
+        size: pointSize,
         color: 0x00ffff,
         sizeAttenuation: true
     });
 
     // Create point cloud mesh
     pointCloud = new THREE.Points(geometry, material);
+
+    // Rotate -π/2 around X axis to correct orientation
+    pointCloud.rotation.x = -Math.PI / 2;
+
     scene.add(pointCloud);
 
     // Update info panel

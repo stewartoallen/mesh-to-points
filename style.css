@@ -51,8 +51,8 @@ body {
     top: 20px;
     left: 20px;
     transform: none;
-    width: 150px;
-    height: 60px;
+    width: 180px;
+    height: 80px;
     border-width: 2px;
 }
 
@@ -68,6 +68,12 @@ body {
     border-color: #00cccc;
     background: rgba(0, 0, 0, 0.9);
     transform: translate(-50%, -50%) scale(1.02);
+}
+
+/* Remove hover scale when minimized to prevent movement */
+.drop-zone.minimized:hover {
+    transform: none;
+    border-color: #00cccc;
 }
 
 .drop-zone.drag-over {
@@ -91,6 +97,54 @@ body {
 .drop-zone-subtext {
     font-size: 14px;
     color: #888888;
+}
+
+/* Controls Panel (top-right) */
+.controls {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    background: rgba(0, 0, 0, 0.8);
+    backdrop-filter: blur(10px);
+    border: 1px solid #333333;
+    border-radius: 8px;
+    padding: 12px 16px;
+    z-index: 100;
+}
+
+/* Step size control */
+.step-size-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.step-size-control label {
+    font-size: 14px;
+    color: #00ffff;
+    font-weight: 600;
+}
+
+.step-size-control select {
+    padding: 6px 12px;
+    font-size: 13px;
+    background: rgba(0, 0, 0, 0.8);
+    border: 1px solid #00ffff;
+    border-radius: 6px;
+    color: #ffffff;
+    cursor: pointer;
+    outline: none;
+    transition: all 0.2s ease;
+}
+
+.step-size-control select:hover {
+    border-color: #00cccc;
+    background: rgba(0, 0, 0, 0.9);
+}
+
+.step-size-control select:focus {
+    border-color: #00ffff;
+    box-shadow: 0 0 8px rgba(0, 255, 255, 0.3);
 }
 
 /* Info Panel */
