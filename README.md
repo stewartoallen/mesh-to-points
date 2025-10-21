@@ -2,6 +2,8 @@
 
 A single-page Three.js application that converts STL files to point cloud meshes using WebAssembly.
 
+> **Note**: See the [`notes/`](notes/) directory for detailed documentation about optimization process, performance analysis, UI improvements, and development session summaries.
+
 ## Overview
 
 This application allows users to drag and drop STL files, which are then converted to point meshes using a custom rastering algorithm. The conversion happens in a Web Worker using WebAssembly (compiled from C) for optimal performance.
