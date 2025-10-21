@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // Configuration
-const STEP_SIZE = 0.05; // mm
+const STEP_SIZE = 1.0; // mm
 
 // DOM elements
 const canvas = document.getElementById('canvas');
@@ -180,10 +180,17 @@ function formatBounds(vec) {
 
 // File handling
 function handleFile(file) {
+    console.log('handleFile called with:', file);
+
     if (!file || !file.name.toLowerCase().endsWith('.stl')) {
         alert('Please select a valid STL file');
         return;
     }
+
+    console.log('File is valid STL:', file.name);
+
+    // Hide drop zone - move to corner
+    dropZone.classList.add('minimized');
 
     updateStatus('Loading file...');
 
@@ -191,8 +198,10 @@ function handleFile(file) {
 
     reader.onload = function(e) {
         const buffer = e.target.result;
+        console.log('File loaded, buffer size:', buffer.byteLength);
 
         // Send to worker for processing
+        console.log('Sending to worker...');
         worker.postMessage({
             type: 'process-stl',
             data: {
@@ -200,6 +209,7 @@ function handleFile(file) {
                 stepSize: STEP_SIZE
             }
         }, [buffer]); // Transfer buffer ownership
+        console.log('Message sent to worker');
     };
 
     reader.onerror = function() {
@@ -212,6 +222,7 @@ function handleFile(file) {
 
 // Drag and drop handlers
 dropZone.addEventListener('click', () => {
+    console.log('Drop zone clicked');
     fileInput.click();
 });
 
@@ -219,22 +230,28 @@ dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
     e.stopPropagation();
     dropZone.classList.add('drag-over');
+    console.log('Drag over');
 });
 
 dropZone.addEventListener('dragleave', (e) => {
     e.preventDefault();
     e.stopPropagation();
     dropZone.classList.remove('drag-over');
+    console.log('Drag leave');
 });
 
 dropZone.addEventListener('drop', (e) => {
+    console.log('Drop event triggered');
     e.preventDefault();
     e.stopPropagation();
     dropZone.classList.remove('drag-over');
 
     const file = e.dataTransfer.files[0];
+    console.log('Dropped file:', file);
     if (file) {
         handleFile(file);
+    } else {
+        console.log('No file in drop event');
     }
 });
 

@@ -38,6 +38,14 @@ async function initWasm() {
         // Use the memory exported by WASM
         wasmMemory = wasmModule.exports.memory;
 
+        // Initialize WASM if needed
+        if (wasmModule.exports._initialize) {
+            console.log('Calling WASM _initialize');
+            wasmModule.exports._initialize();
+        }
+
+        console.log('WASM exports:', Object.keys(wasmModule.exports));
+
         self.postMessage({ type: 'wasm-ready' });
     } catch (error) {
         self.postMessage({
@@ -112,36 +120,55 @@ function parseASCIISTL(text) {
 
 // Convert mesh using WASM
 function convertMesh(positions, triangleCount, stepSize) {
+    console.log('convertMesh: start');
     if (!wasmModule) {
         throw new Error('WASM module not initialized');
     }
 
     // Allocate memory for input triangles
     const inputSize = positions.length * 4; // 4 bytes per float
+    console.log('convertMesh: allocating', inputSize, 'bytes');
     const inputPtr = wasmModule.exports.malloc(inputSize);
+    console.log('convertMesh: input pointer:', inputPtr);
 
     // Copy input data to WASM memory
+    console.log('convertMesh: copying data to WASM memory');
     const inputArray = new Float32Array(wasmMemory.buffer, inputPtr, positions.length);
     inputArray.set(positions);
+    console.log('convertMesh: data copied');
 
     // Allocate memory for output count
     const countPtr = wasmModule.exports.malloc(4); // int = 4 bytes
+    console.log('convertMesh: count pointer:', countPtr);
 
     // Call conversion function
+    console.log('convertMesh: calling WASM convert_to_point_mesh...');
+    console.log('convertMesh: function exists?', typeof wasmModule.exports.convert_to_point_mesh);
+    console.log('convertMesh: parameters:', { inputPtr, triangleCount, stepSize, countPtr });
+
+    const startTime = performance.now();
     const outputPtr = wasmModule.exports.convert_to_point_mesh(
         inputPtr,
         triangleCount,
         stepSize,
         countPtr
     );
+    const elapsed = performance.now() - startTime;
+    console.log('convertMesh: WASM returned after', elapsed, 'ms, output pointer:', outputPtr);
 
     // Read output count
     const countArray = new Int32Array(wasmMemory.buffer, countPtr, 1);
     const pointCount = countArray[0];
+    console.log('convertMesh: point count:', pointCount);
 
-    // Copy output data
+    // Create a view of the output data (no copy needed!)
+    // But we need to copy it because we'll transfer it to main thread and free the WASM memory
     const outputPositions = new Float32Array(wasmMemory.buffer, outputPtr, pointCount * 3);
+    console.log('convertMesh: creating result array, size:', pointCount * 3);
+    const copyStart = performance.now();
     const result = new Float32Array(outputPositions);
+    const copyTime = performance.now() - copyStart;
+    console.log('convertMesh: array copy took', copyTime, 'ms');
 
     // Get bounding box
     const boundsPtr = wasmModule.exports.malloc(24); // 6 floats * 4 bytes
@@ -163,17 +190,21 @@ function convertMesh(positions, triangleCount, stepSize) {
 
 // Handle messages from main thread
 self.onmessage = async function(e) {
+    console.log('Worker received message:', e.data.type);
     const { type, data } = e.data;
 
     try {
         switch (type) {
             case 'init':
+                console.log('Worker: init');
                 await initWasm();
                 break;
 
             case 'process-stl':
+                console.log('Worker: process-stl', data);
                 const { buffer, stepSize } = data;
 
+                console.log('Worker: parsing STL, buffer size:', buffer?.byteLength);
                 self.postMessage({ type: 'status', message: 'Parsing STL...' });
 
                 // Determine if binary or ASCII
@@ -193,17 +224,22 @@ self.onmessage = async function(e) {
                     parsed = parseBinarySTL(buffer);
                 }
 
+                console.log('Worker: parsed triangles:', parsed.triangleCount);
                 self.postMessage({
                     type: 'status',
                     message: `Converting ${parsed.triangleCount} triangles...`
                 });
 
+                console.log('Worker: calling convertMesh');
                 const result = convertMesh(parsed.positions, parsed.triangleCount, stepSize);
+                console.log('Worker: conversion complete, point count:', result.pointCount);
 
                 self.postMessage({
                     type: 'conversion-complete',
                     data: result
                 }, [result.positions.buffer]); // Transfer ownership
+
+                console.log('Worker: result sent to main thread');
 
                 break;
 
@@ -214,6 +250,7 @@ self.onmessage = async function(e) {
                 });
         }
     } catch (error) {
+        console.error('Worker error:', error);
         self.postMessage({
             type: 'error',
             message: error.message,
