@@ -44,8 +44,6 @@ function initScene() {
 
     // Controls
     controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
 
     // Lighting
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
