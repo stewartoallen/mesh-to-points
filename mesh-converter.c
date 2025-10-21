@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -9,7 +10,7 @@
 #define EXPORT
 #endif
 
-#define PRINTF_DEBUG 1  // Set to 1 for debug output (won't work in WASM)
+#define PRINTF_DEBUG 0  // Set to 1 for debug output (won't work in WASM)
 
 typedef struct {
     float x, y, z;

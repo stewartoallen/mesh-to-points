@@ -94,7 +94,7 @@ async function testWasm() {
 
     // Call conversion function
     console.log('\nCalling convert_to_point_mesh...');
-    const stepSize = 0.05;
+    const stepSize = 0.1;
     console.log('Step size:', stepSize);
 
     const outputPtr = exports.convert_to_point_mesh(

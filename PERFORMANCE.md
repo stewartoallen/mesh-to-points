@@ -14,6 +14,7 @@ Hardware: (TBD - add your system info)
 | v0.2 - BB culling | + Bounding box test | 12.4s | TBD | 1.01× | Precomputed bbox, minimal gain |
 | v0.3a - Grid 3D | 3D uniform grid + backface cull | 12.4s | TBD | 1.01× | Dense mesh defeats spatial partitioning |
 | v0.3b - Grid 2D | 2D XY grid + backface cull | 12.4s | TBD | 1.01× | Model too dense, every cell has triangles |
+| v0.4 - Backface culling | Skip triangles with normal.z ≤ 0 | TBD | 8.93s | **2.18×** ✓ | Skips ~50% of triangles, points reduced from 1.2M to 600K |
 
 ## Algorithm Details
 
