@@ -9,10 +9,14 @@ const canvas = document.getElementById('canvas');
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const stepSizeSelect = document.getElementById('step-size-select');
+const recomputeBtn = document.getElementById('recompute-btn');
 const infoPanel = document.getElementById('info');
 const statusEl = document.getElementById('status');
 const pointCountEl = document.getElementById('point-count');
 const boundsEl = document.getElementById('bounds');
+
+// Store last loaded file for recompute
+let lastLoadedFile = null;
 
 // Three.js scene setup
 let scene, camera, renderer, controls;
@@ -66,6 +70,14 @@ function initScene() {
     stepSizeSelect.addEventListener('change', (e) => {
         STEP_SIZE = parseFloat(e.target.value);
         console.log('Step size changed to:', STEP_SIZE, 'mm');
+    });
+
+    // Recompute button handler
+    recomputeBtn.addEventListener('click', () => {
+        if (lastLoadedFile) {
+            console.log('Recomputing with step size:', STEP_SIZE, 'mm');
+            processFile(lastLoadedFile);
+        }
     });
 
     // Start render loop
@@ -236,9 +248,17 @@ function handleFile(file) {
 
     console.log('File is valid STL:', file.name);
 
+    // Store file for recompute
+    lastLoadedFile = file;
+    recomputeBtn.disabled = false;
+
     // Hide drop zone - move to corner
     dropZone.classList.add('minimized');
 
+    processFile(file);
+}
+
+function processFile(file) {
     updateStatus('Loading file...');
 
     const reader = new FileReader();
