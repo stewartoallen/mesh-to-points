@@ -82,6 +82,12 @@ body {
     transform: translate(-50%, -50%) scale(1.05);
 }
 
+/* Remove drag-over scale when minimized to prevent movement */
+.drop-zone.minimized.drag-over {
+    transform: none;
+    border-color: #00ff00;
+}
+
 .drop-zone-content {
     text-align: center;
     pointer-events: none;
@@ -150,7 +156,7 @@ body {
 /* Info Panel */
 .info {
     position: absolute;
-    top: 20px;
+    top: 80px;
     right: 20px;
     background: rgba(0, 0, 0, 0.8);
     backdrop-filter: blur(10px);
