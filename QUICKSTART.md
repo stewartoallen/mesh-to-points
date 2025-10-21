@@ -117,19 +117,64 @@ Start with smaller models (< 10,000 triangles) to verify everything works.
 If you're modifying the code:
 
 1. **Edit C code** (`mesh-converter.c`)
-2. **Recompile WASM**:
+2. **Test natively** (optional but recommended):
+   ```bash
+   gcc test-converter.c -o test-converter -lm -O2
+   ./test-converter inner.stl 0.05
+   ```
+3. **Recompile WASM**:
    ```bash
    emcc mesh-converter.c -o mesh-converter.wasm \
      -s WASM=1 \
      -s STANDALONE_WASM \
-     -s EXPORTED_FUNCTIONS='["_convert_to_point_mesh","_get_bounds","_free_output","_malloc","_free"]' \
+     -s EXPORTED_FUNCTIONS='["_convert_to_point_mesh","_get_bounds","_free_output","_malloc","_free","_test_triangle_data"]' \
      -s ALLOW_MEMORY_GROWTH=1 \
      -O3 \
      --no-entry
    ```
-3. **Refresh browser** (hard refresh with Cmd+Shift+R or Ctrl+Shift+R to clear cache)
+4. **Test WASM** (optional but recommended):
+   ```bash
+   node test-wasm.js
+   ```
+5. **Refresh browser** (hard refresh with Cmd+Shift+R or Ctrl+Shift+R to clear cache)
 
 For JavaScript/HTML/CSS changes, a simple refresh is sufficient.
+
+## Command-Line Testing
+
+Two test programs are available for debugging without the browser:
+
+### Native C Test (`test-converter.c`)
+Tests the algorithm directly without WASM compilation:
+```bash
+gcc test-converter.c -o test-converter -lm -O2
+./test-converter <stl-file> [step-size]
+```
+
+Example output:
+```
+Loading STL file: inner.stl
+Step size: 0.050
+Binary STL: 6120 triangles
+Points generated: 4803032
+Bounding box:
+  Min: (-42.200, -42.195, 0.000)
+  Max: (42.200, 42.195, 28.250)
+```
+
+### WASM Test (`test-wasm.js`)
+Tests the compiled WASM module using Node.js:
+```bash
+node test-wasm.js
+```
+
+This validates:
+- WASM module loads correctly
+- Memory is properly allocated
+- Data passes correctly between JS and WASM
+- Conversion produces expected results
+
+Both tests should produce similar point counts (~4.8M points for inner.stl at 0.05mm step).
 
 ## Browser Console
 

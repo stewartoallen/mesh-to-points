@@ -11,12 +11,9 @@ async function initWasm() {
         const response = await fetch('mesh-converter.wasm');
         const wasmBinary = await response.arrayBuffer();
 
-        // Create shared memory
-        wasmMemory = new WebAssembly.Memory({ initial: 256, maximum: 512 });
-
+        // Let WASM create its own memory (don't provide one)
         const importObject = {
             env: {
-                memory: wasmMemory,
                 emscripten_notify_memory_growth: (index) => {
                     // Called when memory grows
                 },
@@ -37,6 +34,9 @@ async function initWasm() {
 
         const result = await WebAssembly.instantiate(wasmBinary, importObject);
         wasmModule = result.instance;
+
+        // Use the memory exported by WASM
+        wasmMemory = wasmModule.exports.memory;
 
         self.postMessage({ type: 'wasm-ready' });
     } catch (error) {

@@ -47,6 +47,8 @@ The conversion uses an XY rastering approach:
 ├── mesh-converter.c    - C source for mesh conversion algorithm
 ├── mesh-converter.wasm - Compiled WebAssembly module
 ├── style.css           - Application styling
+├── test-converter.c    - Native C test program
+├── test-wasm.js        - Node.js WASM test program
 ├── README.md           - This file (project documentation)
 └── QUICKSTART.md       - Quick start and testing guide
 ```
@@ -94,6 +96,23 @@ npx serve
 Then open `http://localhost:3000` in Chrome.
 
 See [QUICKSTART.md](QUICKSTART.md) for detailed setup and testing instructions.
+
+### Testing
+
+Two test programs are available for validation:
+
+**Native C test:**
+```bash
+gcc test-converter.c -o test-converter -lm -O2
+./test-converter inner.stl 0.05
+```
+
+**WASM test (Node.js):**
+```bash
+node test-wasm.js
+```
+
+Both tests validate the algorithm and WASM integration without requiring a browser. See QUICKSTART.md for more details.
 
 ## Future Enhancements
 - [ ] Adjustable step size via UI
