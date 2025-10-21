@@ -34,8 +34,20 @@ The conversion uses an XY rastering approach:
    - Bounding box information
 
 ### Parameters
-- **Step size**: 0.05mm (internal variable, passed as function parameter to WASM)
+- **Step size**: 0.5mm default (configurable via function parameter)
 - **Output**: Points only where rays intersect surfaces (no volume filling)
+
+### Performance Characteristics
+
+Algorithm complexity: O(grid_points × triangles)
+
+Typical performance for inner.stl (6,120 triangles, 84×84×28mm):
+- **0.05mm step**: 4.8M points, ~280 seconds (not practical for interactive use)
+- **0.1mm step**: 1.2M points, ~20 seconds
+- **0.5mm step**: 48K points, ~0.8 seconds ✓ **recommended**
+- **1.0mm step**: 12K points, ~0.2 seconds
+
+Browser WASM is approximately 1.5× slower than native C compilation.
 
 ## File Structure
 
@@ -116,7 +128,9 @@ Both tests validate the algorithm and WASM integration without requiring a brows
 
 ## Future Enhancements
 - [ ] Adjustable step size via UI
-- [ ] Multiple rastering strategies
+- [ ] **Spatial acceleration structures** (BVH, octree, or uniform grid) to reduce O(n×m) to O(n×log(m))
+- [ ] Progressive rendering (start coarse, refine over time)
+- [ ] Multiple rastering strategies (adaptive sampling, importance sampling)
 - [ ] Export point cloud formats
-- [ ] Progress indication during conversion
 - [ ] Support for other 3D file formats
+- [ ] JS-owned memory buffers to avoid copies and enable shared buffers with Three.js

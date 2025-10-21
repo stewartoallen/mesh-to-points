@@ -231,7 +231,10 @@ self.onmessage = async function(e) {
                 });
 
                 console.log('Worker: calling convertMesh');
+                const conversionStart = performance.now();
                 const result = convertMesh(parsed.positions, parsed.triangleCount, stepSize);
+                const conversionTime = performance.now() - conversionStart;
+                console.log('Worker: TOTAL conversion took', conversionTime.toFixed(2), 'ms');
                 console.log('Worker: conversion complete, point count:', result.pointCount);
 
                 self.postMessage({

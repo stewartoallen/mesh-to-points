@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // Configuration
-const STEP_SIZE = 1.0; // mm
+const STEP_SIZE = 0.5; // mm (balance between detail and performance)
 
 // DOM elements
 const canvas = document.getElementById('canvas');
@@ -120,7 +120,9 @@ function updateStatus(status) {
 
 // Display point cloud in scene
 function displayPointCloud(data) {
+    const renderStart = performance.now();
     const { positions, pointCount, bounds } = data;
+    console.log('displayPointCloud: received', pointCount, 'points,', positions.byteLength, 'bytes');
 
     // Remove existing point cloud
     if (pointCloud) {
@@ -129,9 +131,12 @@ function displayPointCloud(data) {
         pointCloud.material.dispose();
     }
 
+    const geomStart = performance.now();
     // Create point cloud geometry
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const geomTime = performance.now() - geomStart;
+    console.log('displayPointCloud: geometry creation took', geomTime.toFixed(2), 'ms');
 
     // Create point cloud material
     const material = new THREE.PointsMaterial({
@@ -171,6 +176,8 @@ function displayPointCloud(data) {
     controls.target.copy(center);
     controls.update();
 
+    const renderTotal = performance.now() - renderStart;
+    console.log('displayPointCloud: TOTAL render creation took', renderTotal.toFixed(2), 'ms');
     console.log(`Point cloud created: ${pointCount} points`);
 }
 
