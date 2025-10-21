@@ -9,7 +9,7 @@
 #define EXPORT
 #endif
 
-#define PRINTF_DEBUG 0  // Set to 1 for debug output (won't work in WASM)
+#define PRINTF_DEBUG 1  // Set to 1 for debug output (won't work in WASM)
 
 typedef struct {
     float x, y, z;
@@ -25,6 +25,8 @@ typedef struct {
     // Precomputed 2D bounding box for fast culling
     float bbox_min_x, bbox_max_x;
     float bbox_min_y, bbox_max_y;
+    // Precomputed normal Z component for backface culling
+    float normal_z;
 } Triangle;
 
 // Global storage for output points (freed by caller)
@@ -190,7 +192,29 @@ float* convert_to_point_mesh(float* triangles, int triangle_count, float step_si
         if (tris[i].v2.x > tris[i].bbox_max_x) tris[i].bbox_max_x = tris[i].v2.x;
         if (tris[i].v2.y < tris[i].bbox_min_y) tris[i].bbox_min_y = tris[i].v2.y;
         if (tris[i].v2.y > tris[i].bbox_max_y) tris[i].bbox_max_y = tris[i].v2.y;
+
+        // Precompute normal Z component for backface culling
+        // Normal = (v1 - v0) × (v2 - v0), we only need the Z component
+        Vec3 edge1, edge2;
+        edge1.x = tris[i].v1.x - tris[i].v0.x;
+        edge1.y = tris[i].v1.y - tris[i].v0.y;
+        edge1.z = tris[i].v1.z - tris[i].v0.z;
+        edge2.x = tris[i].v2.x - tris[i].v0.x;
+        edge2.y = tris[i].v2.y - tris[i].v0.y;
+        edge2.z = tris[i].v2.z - tris[i].v0.z;
+
+        // Cross product Z component: (edge1 × edge2).z = edge1.x * edge2.y - edge1.y * edge2.x
+        tris[i].normal_z = edge1.x * edge2.y - edge1.y * edge2.x;
     }
+
+#if PRINTF_DEBUG
+    int front_facing = 0, back_facing = 0;
+    for (int i = 0; i < triangle_count; i++) {
+        if (tris[i].normal_z > 0) front_facing++;
+        else back_facing++;
+    }
+    printf("Triangles: %d front-facing, %d back-facing\n", front_facing, back_facing);
+#endif
 
     // Ray direction (pointing down -Z to +Z)
     Vec3 ray_dir = {0.0f, 0.0f, 1.0f};
@@ -203,6 +227,11 @@ float* convert_to_point_mesh(float* triangles, int triangle_count, float step_si
 
             // Check intersection with all triangles
             for (int t = 0; t < triangle_count; t++) {
+                // Backface culling: skip if normal points downward (away from +Z ray)
+                if (tris[t].normal_z <= 0) {
+                    continue;
+                }
+
                 Vec3 intersection;
                 if (ray_triangle_intersect(ray_origin, ray_dir, &tris[t], &intersection)) {
                     add_point(intersection);

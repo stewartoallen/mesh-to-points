@@ -12,7 +12,8 @@ Hardware: (TBD - add your system info)
 |---------|-----------|------------------|-----------------|---------------------|-------|
 | v0.1 - Baseline | Naive (all rays × all tris) | 12.5s | 19.5s | 1.0× | Every ray tests every triangle |
 | v0.2 - BB culling | + Bounding box test | 12.4s | TBD | 1.01× | Precomputed bbox, minimal gain |
-| v0.3 - Grid | Uniform grid acceleration | TODO | TODO | Target: 10-50× | Spatial partitioning needed |
+| v0.3a - Grid 3D | 3D uniform grid + backface cull | 12.4s | TBD | 1.01× | Dense mesh defeats spatial partitioning |
+| v0.3b - Grid 2D | 2D XY grid + backface cull | 12.4s | TBD | 1.01× | Model too dense, every cell has triangles |
 
 ## Algorithm Details
 
@@ -27,11 +28,18 @@ Hardware: (TBD - add your system info)
 - **Complexity**: Still O(n × m), but with ~6 extra comparisons per test
 - **Lesson**: For axis-aligned rays and dense meshes, bbox culling alone doesn't help much
 
-### v0.3 - Uniform Grid Acceleration
-- **Optimization**: Partition triangles into 3D grid cells, only test rays against triangles in intersected cells
-- **Expected speedup**: 10-100× (depends on model complexity and grid resolution)
-- **Complexity**: O(n × (k + t_cell)) where k = cells traversed, t_cell = avg triangles per cell
-- **Memory overhead**: Grid structure + triangle-to-cell mapping
+### v0.3a/b - Uniform Grid Acceleration (3D and 2D)
+- **Optimization**: Partition triangles into grid cells, only test rays against triangles in intersected cells
+- **Actual speedup**: 1.01× (no improvement)
+- **Why it failed**:
+  - `inner.stl` is a dense, cylindrical mesh with triangles distributed throughout the volume
+  - Most grid cells contain most triangles, defeating spatial partitioning
+  - Grid construction/lookup overhead roughly equals savings from skipped tests
+- **Lessons**:
+  - Spatial acceleration works best for sparse scenes or localized geometry
+  - For dense volumetric models like this, every approach still tests most triangles
+  - **Backface culling alone** (filter triangles with normal.z ≤ 0) should help but wasn't separately measured
+- **Next steps**: Need fundamentally different approach or finer/adaptive grid
 
 ## Testing Commands
 
@@ -52,13 +60,44 @@ emcc mesh-converter.c -o mesh-converter.wasm \
 time node test-wasm.js
 ```
 
-## Next Optimizations to Consider
+## What Actually Works for This Use Case
 
-1. **BVH (Bounding Volume Hierarchy)** - Better than uniform grid for complex geometry, O(n × log(m))
-2. **Early ray termination** - Stop at first hit (if only surface needed)
-3. **SIMD operations** - Vectorize intersection tests (4× theoretical speedup)
-4. **Multi-threading** - Split rays across Web Workers (N× cores speedup)
-5. **Adaptive grid** - Finer cells where triangles are dense
+Given that inner.stl is dense and spatial acceleration doesn't help much:
+
+### Practical Optimizations
+1. **Use coarser step sizes** - Already implemented (0.5mm default)
+   - 0.5mm: ~0.8s (interactive) ✓
+   - 1.0mm: ~0.2s (preview) ✓
+
+2. **Early ray termination** - Stop at first hit if only surface points needed
+   - Could reduce hits-per-ray from ~2-3 to 1
+   - Potential 2-3× speedup
+
+3. **SIMD operations** - Vectorize Möller–Trumbore algorithm
+   - 4-8× theoretical with AVX/AVX2
+   - Requires careful implementation
+
+4. **Multi-threading** - Split XY grid across threads
+   - N× cores speedup (4-8× typical)
+   - Easy to parallelize (rays are independent)
+
+### Why Traditional Acceleration Doesn't Help Here
+- **The model**: Cylindrical ring with triangles distributed throughout volume
+- **The pattern**: Every XY location has geometry below it
+- **The result**: Can't skip large portions of the scene
+
+### Better Algorithms for Dense Meshes
+1. **Z-buffer rasterization** - Render from top, capture depth
+   - Essentially what GPUs do
+   - Much faster than ray-per-pixel
+
+2. **Voxelization then sampling** - Convert to voxel grid first
+   - Better cache locality
+   - Can use octree compression
+
+3. **Heightfield extraction** - If model is mostly 2.5D
+   - Store max Z per XY cell
+   - O(1) lookup per ray
 
 ## Profiling Notes
 
