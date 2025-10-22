@@ -160,16 +160,20 @@ ToolCloud* create_tool_cloud(float* points, int point_count, float grid_step) {
     tool->y_offsets = (int*)malloc(sizeof(int) * point_count);
     tool->z_offsets = (float*)malloc(sizeof(float) * point_count);
 
-    // Find tool center (assuming tool is centered at origin)
-    float center_x = 0, center_y = 0, center_z = 0;
+    // Find tool center
+    // For XY: use average (tool should be centered at origin)
+    // For Z: use the HIGHEST point (mounting point / tool holder position)
+    float center_x = 0, center_y = 0;
+    float center_z = -1e10f;  // Start very low, find highest
+
     for (int i = 0; i < point_count; i++) {
         center_x += points[i * 3 + 0];
         center_y += points[i * 3 + 1];
-        center_z += points[i * 3 + 2];
+        float z = points[i * 3 + 2];
+        if (z > center_z) center_z = z;  // Find highest Z (tool mounting point)
     }
     center_x /= point_count;
     center_y /= point_count;
-    center_z /= point_count;
 
     // Convert to offsets
     for (int i = 0; i < point_count; i++) {

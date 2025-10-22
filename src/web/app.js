@@ -73,9 +73,41 @@ function initScene() {
     const gridHelper = new THREE.GridHelper(100, 20, 0x444444, 0x222222);
     scene.add(gridHelper);
 
-    // Axes helper
-    const axesHelper = new THREE.AxesHelper(10);
+    // Axes helper (X=red, Y=green, Z=blue)
+    const axesHelper = new THREE.AxesHelper(20);
     scene.add(axesHelper);
+
+    // Add axis labels
+    const canvas2d = document.createElement('canvas');
+    const context = canvas2d.getContext('2d');
+    canvas2d.width = 64;
+    canvas2d.height = 64;
+
+    function createTextSprite(text, color) {
+        context.clearRect(0, 0, 64, 64);
+        context.font = 'Bold 40px Arial';
+        context.fillStyle = color;
+        context.textAlign = 'center';
+        context.fillText(text, 32, 40);
+
+        const texture = new THREE.CanvasTexture(canvas2d);
+        const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
+        const sprite = new THREE.Sprite(spriteMaterial);
+        sprite.scale.set(5, 5, 1);
+        return sprite;
+    }
+
+    const xLabel = createTextSprite('X', '#ff0000');
+    xLabel.position.set(25, 0, 0);
+    scene.add(xLabel);
+
+    const yLabel = createTextSprite('Y', '#00ff00');
+    yLabel.position.set(0, 25, 0);
+    scene.add(yLabel);
+
+    const zLabel = createTextSprite('Z', '#0000ff');
+    zLabel.position.set(0, 0, 25);
+    scene.add(zLabel);
 
     // Window resize handler
     window.addEventListener('resize', onWindowResize);
@@ -298,6 +330,9 @@ function displayToolpath(data) {
     console.log('displayToolpath: bounds', bounds);
     console.log('displayToolpath: gridStep', gridStep, 'xStep', xStep, 'yStep', yStep);
     console.log('displayToolpath: scanlines', numScanlines, 'pointsPerLine', pointsPerLine);
+    console.log('displayToolpath: terrain grid dimensions from bounds:',
+        'width =', (bounds.max.x - bounds.min.x) / gridStep,
+        'height =', (bounds.max.y - bounds.min.y) / gridStep);
 
     // Create position array for toolpath points
     const positions = [];
@@ -327,8 +362,21 @@ function displayToolpath(data) {
     const pointCount = positions.length / 3;
 
     console.log('displayToolpath: created', pointCount, 'toolpath points');
-    console.log('displayToolpath: sample points (first 3):',
-        positionsArray.slice(0, 9));
+    console.log('displayToolpath: first 3 points:', positionsArray.slice(0, 9));
+    console.log('displayToolpath: last 3 points:', positionsArray.slice(-9));
+
+    // Calculate XY range of toolpath
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (let i = 0; i < positionsArray.length; i += 3) {
+        const x = positionsArray[i];
+        const y = positionsArray[i + 1];
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+    }
+    console.log('displayToolpath: XY range: X[', minX, ',', maxX, '] Y[', minY, ',', maxY, ']');
+    console.log('displayToolpath: terrain XY range: X[', bounds.min.x, ',', bounds.max.x, '] Y[', bounds.min.y, ',', bounds.max.y, ']');
 
     // Create geometry
     const geometry = new THREE.BufferGeometry();
