@@ -5,6 +5,9 @@ let meshMemory = null;
 let toolpathWasm = null;
 let toolpathMemory = null;
 
+// Use v2 generator (set to false to use v1)
+const USE_V2_GENERATOR = true;
+
 // Initialize WASM modules
 async function initWasm() {
     if (meshWasm && toolpathWasm) return;
@@ -39,8 +42,10 @@ async function initWasm() {
 
         console.log('Mesh WASM loaded:', Object.keys(meshWasm.exports));
 
-        // Load toolpath generator WASM
-        const toolpathResponse = await fetch('toolpath-generator.wasm');
+        // Load toolpath generator WASM (v1 or v2)
+        const toolpathFile = USE_V2_GENERATOR ? 'toolpath-generator-v2.wasm' : 'toolpath-generator.wasm';
+        console.log('Loading toolpath generator:', toolpathFile);
+        const toolpathResponse = await fetch(toolpathFile);
         const toolpathBinary = await toolpathResponse.arrayBuffer();
 
         const toolpathResult = await WebAssembly.instantiate(toolpathBinary, importObject);
@@ -195,12 +200,96 @@ function convertMesh(positions, triangleCount, stepSize, filterMode) {
     return { positions: result, pointCount, bounds };
 }
 
-// Generate toolpath using toolpath WASM
-function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep) {
-    console.log('generateToolpath: start, gridStep:', gridStep);
-    if (!toolpathWasm) {
-        throw new Error('Toolpath WASM module not initialized');
-    }
+// Generate toolpath using toolpath WASM (v2 - height map based)
+function generateToolpathV2(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep) {
+    console.log('generateToolpathV2: start, gridStep:', gridStep);
+
+    const startTime = performance.now();
+
+    // Allocate and copy terrain points
+    const terrainSize = terrainPoints.length * 4;
+    const terrainPtr = toolpathWasm.exports.malloc(terrainSize);
+    const terrainArray = new Float32Array(toolpathMemory.buffer, terrainPtr, terrainPoints.length);
+    terrainArray.set(terrainPoints);
+
+    // Allocate and copy tool points
+    const toolSize = toolPoints.length * 4;
+    const toolPtr = toolpathWasm.exports.malloc(toolSize);
+    const toolArray = new Float32Array(toolpathMemory.buffer, toolPtr, toolPoints.length);
+    toolArray.set(toolPoints);
+
+    // Create terrain height map
+    const terrainPointCount = terrainPoints.length / 3;
+    const terrainMapPtr = toolpathWasm.exports.create_terrain_map(terrainPtr, terrainPointCount, gridStep);
+    console.log('generateToolpathV2: terrain map created:', terrainMapPtr);
+
+    // Create tool height map
+    const toolPointCount = toolPoints.length / 3;
+    const toolMapPtr = toolpathWasm.exports.create_tool_map(toolPtr, toolPointCount, gridStep);
+    console.log('generateToolpathV2: tool map created:', toolMapPtr);
+
+    // Get terrain dimensions for verification
+    const terrainDimPtr = toolpathWasm.exports.malloc(8);
+    toolpathWasm.exports.get_map_dimensions(terrainMapPtr, terrainDimPtr, terrainDimPtr + 4);
+    const terrainDims = new Int32Array(toolpathMemory.buffer, terrainDimPtr, 2);
+    console.log('generateToolpathV2: terrain map size:', terrainDims[0], 'x', terrainDims[1]);
+
+    // Get tool dimensions for verification
+    const toolDimPtr = toolpathWasm.exports.malloc(8);
+    toolpathWasm.exports.get_map_dimensions(toolMapPtr, toolDimPtr, toolDimPtr + 4);
+    const toolDims = new Int32Array(toolpathMemory.buffer, toolDimPtr, 2);
+    console.log('generateToolpathV2: tool map size:', toolDims[0], 'x', toolDims[1]);
+
+    // Generate toolpath
+    const toolpathPtr = toolpathWasm.exports.generate_path(
+        terrainMapPtr,
+        toolMapPtr,
+        xStep,
+        yStep,
+        oobZ
+    );
+    console.log('generateToolpathV2: toolpath generated:', toolpathPtr);
+
+    // Get dimensions
+    const dimPtr = toolpathWasm.exports.malloc(8); // 2 ints
+    toolpathWasm.exports.get_path_dimensions(toolpathPtr, dimPtr, dimPtr + 4);
+    const dimArray = new Int32Array(toolpathMemory.buffer, dimPtr, 2);
+    const numScanlines = dimArray[0];
+    const pointsPerLine = dimArray[1];
+    console.log('generateToolpathV2: dimensions:', numScanlines, 'x', pointsPerLine);
+
+    // Copy path data
+    const pathDataSize = numScanlines * pointsPerLine;
+    const pathDataPtr = toolpathWasm.exports.malloc(pathDataSize * 4);
+    toolpathWasm.exports.copy_path_data(toolpathPtr, pathDataPtr);
+
+    const pathData = new Float32Array(toolpathMemory.buffer, pathDataPtr, pathDataSize);
+    const result = new Float32Array(pathData);
+
+    const elapsed = performance.now() - startTime;
+    console.log('generateToolpathV2: complete in', elapsed.toFixed(2), 'ms');
+
+    // Free memory
+    toolpathWasm.exports.free(terrainDimPtr);
+    toolpathWasm.exports.free(toolDimPtr);
+    toolpathWasm.exports.free(dimPtr);
+    toolpathWasm.exports.free(pathDataPtr);
+    toolpathWasm.exports.free_toolpath(toolpathPtr);
+    toolpathWasm.exports.free_height_map(toolMapPtr);
+    toolpathWasm.exports.free_height_map(terrainMapPtr);
+    toolpathWasm.exports.free(toolPtr);
+    toolpathWasm.exports.free(terrainPtr);
+
+    return {
+        pathData: result,
+        numScanlines,
+        pointsPerLine
+    };
+}
+
+// Generate toolpath using toolpath WASM (v1 - original)
+function generateToolpathV1(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep) {
+    console.log('generateToolpathV1: start, gridStep:', gridStep);
 
     const startTime = performance.now();
 
@@ -219,12 +308,12 @@ function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridSte
     // Create terrain grid
     const terrainPointCount = terrainPoints.length / 3;
     const terrainGridPtr = toolpathWasm.exports.create_grid(terrainPtr, terrainPointCount);
-    console.log('generateToolpath: terrain grid created:', terrainGridPtr);
+    console.log('generateToolpathV1: terrain grid created:', terrainGridPtr);
 
     // Create tool cloud with the actual grid step used
     const toolPointCount = toolPoints.length / 3;
     const toolCloudPtr = toolpathWasm.exports.create_tool(toolPtr, toolPointCount, gridStep);
-    console.log('generateToolpath: tool cloud created:', toolCloudPtr);
+    console.log('generateToolpathV1: tool cloud created:', toolCloudPtr);
 
     // Generate toolpath
     const toolpathPtr = toolpathWasm.exports.generate_path(
@@ -234,7 +323,7 @@ function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridSte
         yStep,
         oobZ
     );
-    console.log('generateToolpath: toolpath generated:', toolpathPtr);
+    console.log('generateToolpathV1: toolpath generated:', toolpathPtr);
 
     // Get dimensions
     const dimPtr = toolpathWasm.exports.malloc(8); // 2 ints
@@ -242,7 +331,7 @@ function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridSte
     const dimArray = new Int32Array(toolpathMemory.buffer, dimPtr, 2);
     const numScanlines = dimArray[0];
     const pointsPerLine = dimArray[1];
-    console.log('generateToolpath: dimensions:', numScanlines, 'x', pointsPerLine);
+    console.log('generateToolpathV1: dimensions:', numScanlines, 'x', pointsPerLine);
 
     // Copy path data
     const pathDataSize = numScanlines * pointsPerLine;
@@ -253,7 +342,7 @@ function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridSte
     const result = new Float32Array(pathData);
 
     const elapsed = performance.now() - startTime;
-    console.log('generateToolpath: complete in', elapsed.toFixed(2), 'ms');
+    console.log('generateToolpathV1: complete in', elapsed.toFixed(2), 'ms');
 
     // Free memory
     toolpathWasm.exports.free(dimPtr);
@@ -269,6 +358,17 @@ function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridSte
         numScanlines,
         pointsPerLine
     };
+}
+
+// Generate toolpath using selected version
+function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep) {
+    if (!toolpathWasm) {
+        throw new Error('Toolpath WASM module not initialized');
+    }
+
+    return USE_V2_GENERATOR
+        ? generateToolpathV2(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep)
+        : generateToolpathV1(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep);
 }
 
 // Handle messages from main thread
