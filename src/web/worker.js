@@ -196,8 +196,8 @@ function convertMesh(positions, triangleCount, stepSize, filterMode) {
 }
 
 // Generate toolpath using toolpath WASM
-function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ) {
-    console.log('generateToolpath: start');
+function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep) {
+    console.log('generateToolpath: start, gridStep:', gridStep);
     if (!toolpathWasm) {
         throw new Error('Toolpath WASM module not initialized');
     }
@@ -221,9 +221,9 @@ function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ) {
     const terrainGridPtr = toolpathWasm.exports.create_grid(terrainPtr, terrainPointCount);
     console.log('generateToolpath: terrain grid created:', terrainGridPtr);
 
-    // Create tool cloud (grid step = 0.5mm for now, should match terrain)
+    // Create tool cloud with the actual grid step used
     const toolPointCount = toolPoints.length / 3;
-    const toolCloudPtr = toolpathWasm.exports.create_tool(toolPtr, toolPointCount, 0.5);
+    const toolCloudPtr = toolpathWasm.exports.create_tool(toolPtr, toolPointCount, gridStep);
     console.log('generateToolpath: tool cloud created:', toolCloudPtr);
 
     // Generate toolpath
@@ -333,12 +333,12 @@ self.onmessage = async function(e) {
 
             case 'generate-toolpath':
                 console.log('Worker: generate-toolpath', data);
-                const { terrainPoints, toolPoints, xStep, yStep, oobZ } = data;
+                const { terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep } = data;
 
                 self.postMessage({ type: 'status', message: 'Generating toolpath...' });
 
                 const pathStart = performance.now();
-                const pathResult = generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ);
+                const pathResult = generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep);
                 const pathTime = performance.now() - pathStart;
                 console.log('Worker: toolpath generation took', pathTime.toFixed(2), 'ms');
 

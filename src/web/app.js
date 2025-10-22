@@ -37,7 +37,7 @@ let worker = null;
 let terrainData = null;
 let toolData = null;
 let toolFile = null;
-let isLoadingTool = false; // Flag to prevent terrain data from being overwritten
+let pendingToolLoad = false; // Flag to indicate tool is being loaded next
 
 function initScene() {
     // Scene
@@ -119,10 +119,44 @@ function initScene() {
     });
 
     // Recompute button handler
-    recomputeBtn.addEventListener('click', () => {
+    recomputeBtn.addEventListener('click', async () => {
         if (lastLoadedFile) {
             console.log('Recomputing with step size:', STEP_SIZE, 'mm');
+
+            // Clear existing toolpath since resolution changed
+            if (toolpathCloud) {
+                scene.remove(toolpathCloud);
+                toolpathCloud.geometry.dispose();
+                toolpathCloud.material.dispose();
+                toolpathCloud = null;
+                clearToolpathBtn.disabled = true;
+            }
+
+            // Clear tool data so it needs to be regenerated
+            toolData = null;
+
+            // Recompute terrain
             processFile(lastLoadedFile);
+
+            // If tool was loaded, recompute it too AFTER terrain finishes
+            if (toolFile) {
+                console.log('Recomputing tool with step size:', STEP_SIZE, 'mm');
+
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    // Set flag right before sending to worker
+                    pendingToolLoad = true;
+                    worker.postMessage({
+                        type: 'process-stl',
+                        data: {
+                            buffer: e.target.result,
+                            stepSize: STEP_SIZE,
+                            filterMode: 1 // FILTER_DOWNWARD_FACING for tool
+                        }
+                    }, [e.target.result]);
+                };
+                reader.readAsArrayBuffer(toolFile);
+            }
         }
     });
 
@@ -160,11 +194,11 @@ function initWorker() {
                 break;
 
             case 'conversion-complete':
-                if (isLoadingTool) {
+                if (pendingToolLoad) {
                     // This is tool data, don't replace terrain
                     toolData = data;
                     console.log('Tool loaded:', data.pointCount, 'points');
-                    isLoadingTool = false;
+                    pendingToolLoad = false;
                 } else {
                     // This is terrain data
                     terrainData = data;
@@ -524,9 +558,6 @@ generateToolpathBtn.addEventListener('click', async () => {
         // Read tool file
         const buffer = await toolFile.arrayBuffer();
 
-        // Set flag to indicate we're loading tool, not terrain
-        isLoadingTool = true;
-
         // Convert tool STL to points using worker
         const convertTool = new Promise((resolve, reject) => {
             const tempHandler = function(e) {
@@ -538,7 +569,7 @@ generateToolpathBtn.addEventListener('click', async () => {
                     worker.removeEventListener('message', tempHandler);
                     resolve();
                 } else if (type === 'error') {
-                    isLoadingTool = false;
+                    pendingToolLoad = false;
                     worker.removeEventListener('message', tempHandler);
                     reject(new Error(message));
                 }
@@ -546,6 +577,8 @@ generateToolpathBtn.addEventListener('click', async () => {
 
             worker.addEventListener('message', tempHandler);
 
+            // Set flag right before sending to worker
+            pendingToolLoad = true;
             worker.postMessage({
                 type: 'process-stl',
                 data: {
@@ -563,7 +596,7 @@ generateToolpathBtn.addEventListener('click', async () => {
         const yStep = parseInt(yStepInput.value);
         const zFloor = parseFloat(zFloorInput.value);
 
-        console.log('Generating toolpath with X step:', xStep, 'Y step:', yStep, 'Z floor:', zFloor);
+        console.log('Generating toolpath with X step:', xStep, 'Y step:', yStep, 'Z floor:', zFloor, 'Grid step:', STEP_SIZE);
         updateStatus('Generating toolpath...');
 
         worker.postMessage({
@@ -573,7 +606,8 @@ generateToolpathBtn.addEventListener('click', async () => {
                 toolPoints: toolData.positions,
                 xStep: xStep,
                 yStep: yStep,
-                oobZ: zFloor
+                oobZ: zFloor,
+                gridStep: STEP_SIZE
             }
         });
 
