@@ -301,14 +301,43 @@ float* convert_to_point_mesh(float* triangles, int triangle_count, float step_si
             int cell_idx = cell_y * grid->res_x + cell_x;
             GridCell* cell = &grid->cells[cell_idx];
 
+            // Find the best intersection (highest for terrain, lowest for tool)
+            int found_intersection = 0;
+            Vec3 best_intersection;
+
+            if (filter_mode == FILTER_UPWARD_FACING) {
+                // Terrain: find HIGHEST Z intersection
+                best_intersection.z = -1e10f;
+            } else {
+                // Tool: find LOWEST Z intersection
+                best_intersection.z = 1e10f;
+            }
+
             // Test only triangles in this cell
             for (int i = 0; i < cell->count; i++) {
                 int t = cell->triangle_indices[i];
 
                 Vec3 intersection;
                 if (ray_triangle_intersect(ray_origin, ray_dir, &tris[t], &intersection)) {
-                    add_point(intersection);
+                    if (filter_mode == FILTER_UPWARD_FACING) {
+                        // Terrain: keep highest
+                        if (intersection.z > best_intersection.z) {
+                            best_intersection = intersection;
+                            found_intersection = 1;
+                        }
+                    } else {
+                        // Tool: keep lowest
+                        if (intersection.z < best_intersection.z) {
+                            best_intersection = intersection;
+                            found_intersection = 1;
+                        }
+                    }
                 }
+            }
+
+            // Add the best intersection point if found
+            if (found_intersection) {
+                add_point(best_intersection);
             }
         }
     }
