@@ -1,10 +1,5 @@
-/**
- * CLI Test Program for Toolpath Generation
- *
- * Usage: ./test-toolpath <terrain.stl> <tool.stl> <x_step> <y_step>
- *
- * Example: ./test-toolpath inner.stl hemisphere_tool_5mm.stl 2 10
- */
+// test-toolpath-v2.c
+// CLI test for v2 toolpath generator (height map based)
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,255 +7,145 @@
 #include <math.h>
 #include <time.h>
 
-// Include the toolpath generator source directly for native testing
-#include "../wasm/toolpath-generator.c"
-
-// STL reading functions from existing test code
+// Simple STL parser (binary format only)
 typedef struct {
-    float x, y, z;
-} Vertex;
+    float* vertices;  // Flat array of vertices (x,y,z per vertex)
+    int triangle_count;
+} STLMesh;
 
-typedef struct {
-    Vertex normal;
-    Vertex vertices[3];
-} Triangle;
-
-typedef struct {
-    Triangle* triangles;
-    int count;
-} STLData;
-
-STLData* read_stl_binary(const char* filename) {
+STLMesh* load_stl_binary(const char* filename) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
-        fprintf(stderr, "Error: Could not open file %s\n", filename);
+        printf("Error: Cannot open file %s\n", filename);
         return NULL;
     }
 
-    // Skip 80-byte header
+    // Skip header (80 bytes)
     fseek(file, 80, SEEK_SET);
 
     // Read triangle count
-    unsigned int triangle_count;
-    fread(&triangle_count, sizeof(unsigned int), 1, file);
+    uint32_t triangle_count;
+    fread(&triangle_count, 4, 1, file);
+    printf("Loading %u triangles from %s\n", triangle_count, filename);
 
-    STLData* data = (STLData*)malloc(sizeof(STLData));
-    data->count = triangle_count;
-    data->triangles = (Triangle*)malloc(sizeof(Triangle) * triangle_count);
+    // Allocate vertices array (9 floats per triangle)
+    STLMesh* mesh = (STLMesh*)malloc(sizeof(STLMesh));
+    mesh->triangle_count = triangle_count;
+    mesh->vertices = (float*)malloc(triangle_count * 9 * sizeof(float));
 
     // Read triangles
-    for (unsigned int i = 0; i < triangle_count; i++) {
-        // Normal
-        fread(&data->triangles[i].normal, sizeof(float), 3, file);
-        // Vertices
-        fread(&data->triangles[i].vertices, sizeof(float), 9, file);
-        // Skip attribute byte count
+    for (uint32_t i = 0; i < triangle_count; i++) {
+        // Skip normal (12 bytes)
+        fseek(file, 12, SEEK_CUR);
+
+        // Read 3 vertices (9 floats)
+        fread(&mesh->vertices[i * 9], sizeof(float), 9, file);
+
+        // Skip attribute (2 bytes)
         fseek(file, 2, SEEK_CUR);
     }
 
     fclose(file);
-    return data;
+    return mesh;
 }
 
-void free_stl_data(STLData* data) {
-    if (data) {
-        free(data->triangles);
-        free(data);
-    }
-}
+// Stub mesh converter - we'll use pre-converted points
+#include "../wasm/mesh-converter-lib.h"
 
-// Convert STL triangles to flat array for mesh converter
-float* triangles_to_array(STLData* data) {
-    int float_count = data->count * 9; // 3 vertices * 3 floats per triangle
-    float* array = (float*)malloc(sizeof(float) * float_count);
+// Include toolpath generator
+#include "../wasm/toolpath-generator.c"
 
-    for (int i = 0; i < data->count; i++) {
-        for (int v = 0; v < 3; v++) {
-            array[i * 9 + v * 3 + 0] = data->triangles[i].vertices[v].x;
-            array[i * 9 + v * 3 + 1] = data->triangles[i].vertices[v].y;
-            array[i * 9 + v * 3 + 2] = data->triangles[i].vertices[v].z;
-        }
-    }
-
-    return array;
-}
-
-// Simple mesh-to-points converter (XY rasterization) - simplified version
-float* convert_mesh_to_points(float* triangles, int triangle_count, float step_size, int* out_point_count) {
-    // Find bounding box
-    float min_x = 1e10, max_x = -1e10;
-    float min_y = 1e10, max_y = -1e10;
-    float min_z = 1e10, max_z = -1e10;
-
-    for (int i = 0; i < triangle_count * 3; i++) {
-        float x = triangles[i * 3 + 0];
-        float y = triangles[i * 3 + 1];
-        float z = triangles[i * 3 + 2];
-
-        if (x < min_x) min_x = x;
-        if (x > max_x) max_x = x;
-        if (y < min_y) min_y = y;
-        if (y > max_y) max_y = y;
-        if (z < min_z) min_z = z;
-        if (z > max_z) max_z = z;
-    }
-
-    printf("  Bounds: X[%.2f, %.2f] Y[%.2f, %.2f] Z[%.2f, %.2f]\n",
-           min_x, max_x, min_y, max_y, min_z, max_z);
-
-    // Calculate grid dimensions
-    int grid_x = (int)((max_x - min_x) / step_size) + 1;
-    int grid_y = (int)((max_y - min_y) / step_size) + 1;
-
-    printf("  Grid: %d x %d (step: %.3fmm)\n", grid_x, grid_y, step_size);
-
-    // Allocate point array (worst case: one point per grid cell)
-    float* points = (float*)malloc(sizeof(float) * grid_x * grid_y * 3);
-    int point_count = 0;
-
-    // Raster XY plane
-    for (int iy = 0; iy < grid_y; iy++) {
-        float y = min_y + iy * step_size;
-
-        for (int ix = 0; ix < grid_x; ix++) {
-            float x = min_x + ix * step_size;
-
-            // Cast ray down from top, find highest intersection
-            float highest_z = -1e10;
-            int found_hit = 0;
-
-            // Test ray against all triangles (simplified - not optimized)
-            for (int t = 0; t < triangle_count; t++) {
-                float* tri = &triangles[t * 9];
-                float x0 = tri[0], y0 = tri[1], z0 = tri[2];
-                float x1 = tri[3], y1 = tri[4], z1 = tri[5];
-                float x2 = tri[6], y2 = tri[7], z2 = tri[8];
-
-                // Simple point-in-triangle test and Z interpolation
-                // This is a very simplified version - just checking bounding box for now
-                float tri_min_x = fmin(fmin(x0, x1), x2) - step_size;
-                float tri_max_x = fmax(fmax(x0, x1), x2) + step_size;
-                float tri_min_y = fmin(fmin(y0, y1), y2) - step_size;
-                float tri_max_y = fmax(fmax(y0, y1), y2) + step_size;
-
-                if (x >= tri_min_x && x <= tri_max_x && y >= tri_min_y && y <= tri_max_y) {
-                    // Approximate Z by taking average of triangle vertices
-                    float avg_z = (z0 + z1 + z2) / 3.0;
-                    if (avg_z > highest_z) {
-                        highest_z = avg_z;
-                        found_hit = 1;
-                    }
-                }
-            }
-
-            if (found_hit) {
-                points[point_count * 3 + 0] = x;
-                points[point_count * 3 + 1] = y;
-                points[point_count * 3 + 2] = highest_z;
-                point_count++;
-            }
-        }
-    }
-
-    *out_point_count = point_count;
-    printf("  Generated %d points\n", point_count);
-
-    return points;
-}
-
-int main(int argc, char* argv[]) {
-    if (argc != 5) {
-        printf("Usage: %s <terrain.stl> <tool.stl> <x_step> <y_step>\n", argv[0]);
-        printf("  x_step, y_step: grid units to step (e.g., 2, 10)\n");
-        printf("\nExample: %s inner.stl hemisphere_tool_5mm.stl 2 10\n", argv[0]);
+int main(int argc, char** argv) {
+    if (argc < 3) {
+        printf("Usage: %s <terrain.stl> <tool.stl> [step_size] [x_step] [y_step]\n", argv[0]);
         return 1;
     }
 
     const char* terrain_file = argv[1];
     const char* tool_file = argv[2];
-    int x_step = atoi(argv[3]);
-    int y_step = atoi(argv[4]);
+    float step_size = argc > 3 ? atof(argv[3]) : 0.5f;
+    int x_step = argc > 4 ? atoi(argv[4]) : 5;
+    int y_step = argc > 5 ? atoi(argv[5]) : 5;
 
-    printf("=== Toolpath Generator Test ===\n\n");
+    printf("\n=== Toolpath Generator Test ===\n");
+    printf("Step size: %.2fmm\n", step_size);
+    printf("X/Y steps: %d/%d\n", x_step, y_step);
 
-    // Load terrain STL
-    printf("Loading terrain: %s\n", terrain_file);
-    STLData* terrain_stl = read_stl_binary(terrain_file);
+    // Load and convert terrain
+    printf("\n--- Converting Terrain ---\n");
+    STLMesh* terrain_stl = load_stl_binary(terrain_file);
     if (!terrain_stl) return 1;
-    printf("  Triangles: %d\n", terrain_stl->count);
-
-    // Load tool STL
-    printf("\nLoading tool: %s\n", tool_file);
-    STLData* tool_stl = read_stl_binary(tool_file);
-    if (!tool_stl) {
-        free_stl_data(terrain_stl);
-        return 1;
-    }
-    printf("  Triangles: %d\n", tool_stl->count);
-
-    // Convert to point clouds
-    printf("\nConverting terrain to point cloud...\n");
-    float* terrain_triangles = triangles_to_array(terrain_stl);
-    int terrain_point_count;
-    float* terrain_points = convert_mesh_to_points(terrain_triangles, terrain_stl->count, 0.5, &terrain_point_count);
-
-    printf("\nConverting tool to point cloud...\n");
-    float* tool_triangles = triangles_to_array(tool_stl);
-    int tool_point_count;
-    float* tool_points = convert_mesh_to_points(tool_triangles, tool_stl->count, 0.5, &tool_point_count);
-
-    // Create grids
-    printf("\nCreating terrain grid...\n");
-    PointGrid* terrain_grid = create_point_grid(terrain_points, terrain_point_count);
-    printf("  Grid dimensions: %d x %d\n", terrain_grid->width, terrain_grid->height);
-
-    printf("\nCreating tool cloud...\n");
-    ToolCloud* tool_cloud = create_tool_cloud(tool_points, tool_point_count, 0.5);
-    printf("  Tool points: %d\n", tool_cloud->point_count);
-
-    // Generate toolpath
-    printf("\nGenerating toolpath...\n");
-    printf("  X step: %d grid units\n", x_step);
-    printf("  Y step: %d grid units\n", y_step);
 
     clock_t start = clock();
-    ToolPath* path = generate_toolpath(terrain_grid, tool_cloud, x_step, y_step, -100.0);
-    clock_t end = clock();
+    int terrain_point_count;
+    float* terrain_points = convert_to_point_mesh(
+        terrain_stl->vertices,
+        terrain_stl->triangle_count,
+        step_size,
+        &terrain_point_count,
+        0  // FILTER_UPWARD_FACING
+    );
+    clock_t terrain_time = clock() - start;
+    printf("Terrain: %d points in %.3f seconds\n",
+           terrain_point_count,
+           (double)terrain_time / CLOCKS_PER_SEC);
 
-    double time_taken = ((double)(end - start)) / CLOCKS_PER_SEC;
+    // Load and convert tool
+    printf("\n--- Converting Tool ---\n");
+    STLMesh* tool_stl = load_stl_binary(tool_file);
+    if (!tool_stl) return 1;
 
-    printf("  Scanlines: %d\n", path->num_scanlines);
-    printf("  Points per line: %d\n", path->points_per_line);
-    printf("  Total points: %d\n", path->num_scanlines * path->points_per_line);
-    printf("  Time: %.3f seconds\n", time_taken);
+    start = clock();
+    int tool_point_count;
+    float* tool_points = convert_to_point_mesh(
+        tool_stl->vertices,
+        tool_stl->triangle_count,
+        step_size,
+        &tool_point_count,
+        1  // FILTER_DOWNWARD_FACING
+    );
+    clock_t tool_time = clock() - start;
+    printf("Tool: %d points in %.3f seconds\n",
+           tool_point_count,
+           (double)tool_time / CLOCKS_PER_SEC);
 
-    // Sample output (first few points)
-    printf("\nSample toolpath (first 5 points of first scanline):\n");
-    for (int i = 0; i < 5 && i < path->points_per_line; i++) {
-        printf("  [%d]: Z = %.3f mm\n", i, path->scanlines[0][i]);
-    }
+    // Create height maps
+    printf("\n--- Creating Height Maps ---\n");
+    start = clock();
+    HeightMap* terrain_map = create_terrain_map(terrain_points, terrain_point_count, step_size);
+    HeightMap* tool_map = create_tool_map(tool_points, tool_point_count, step_size);
+    clock_t map_time = clock() - start;
 
-    // Output some statistics
-    float min_z = 1e10, max_z = -1e10;
-    for (int y = 0; y < path->num_scanlines; y++) {
-        for (int x = 0; x < path->points_per_line; x++) {
-            float z = path->scanlines[y][x];
-            if (z < min_z) min_z = z;
-            if (z > max_z) max_z = z;
-        }
-    }
-    printf("\nPath Z range: [%.3f, %.3f] mm\n", min_z, max_z);
+    printf("Terrain map: %d x %d (%.3f seconds)\n",
+           terrain_map->width, terrain_map->height,
+           (double)map_time / CLOCKS_PER_SEC);
+    printf("Tool map: %d x %d\n", tool_map->width, tool_map->height);
+
+
+    // Generate toolpath
+    printf("\n--- Generating Toolpath ---\n");
+    start = clock();
+    ToolPath* path = generate_toolpath(terrain_map, tool_map, x_step, y_step, -100.0f);
+    clock_t path_time = clock() - start;
+
+    printf("Toolpath: %d x %d = %d points\n",
+           path->points_per_line, path->num_scanlines,
+           path->points_per_line * path->num_scanlines);
+    printf("Generation time: %.6f seconds (%.3f ms)\n",
+           (double)path_time / CLOCKS_PER_SEC,
+           (double)path_time / CLOCKS_PER_SEC * 1000.0);
+
 
     // Cleanup
     free_toolpath(path);
-    free_tool_cloud(tool_cloud);
-    free_point_grid(terrain_grid);
-    free(tool_points);
-    free(terrain_points);
-    free(tool_triangles);
-    free(terrain_triangles);
-    free_stl_data(tool_stl);
-    free_stl_data(terrain_stl);
+    free_height_map(tool_map);
+    free_height_map(terrain_map);
+    // Note: tool_points and terrain_points are managed by mesh-converter-lib
+    // Don't free them directly
+    free(tool_stl->vertices);
+    free(tool_stl);
+    free(terrain_stl->vertices);
+    free(terrain_stl);
 
     printf("\n=== Test Complete ===\n");
     return 0;

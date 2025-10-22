@@ -50,7 +50,7 @@ void calculate_bounds(float* triangles, int triangle_count) {
 // Fast ray-AABB (Axis-Aligned Bounding Box) test for Z-axis rays
 // Returns 1 if ray (at x,y going through Z) could hit triangle, 0 otherwise
 // Uses precomputed bbox from Triangle struct
-inline int ray_could_hit_triangle_bbox(float ray_x, float ray_y, Triangle* tri) {
+static inline int ray_could_hit_triangle_bbox(float ray_x, float ray_y, Triangle* tri) {
     return (ray_x >= tri->bbox_min_x && ray_x <= tri->bbox_max_x &&
             ray_y >= tri->bbox_min_y && ray_y <= tri->bbox_max_y);
 }
