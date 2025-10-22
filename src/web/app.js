@@ -38,13 +38,14 @@ let scene, camera, renderer, controls;
 let pointCloud = null;
 let toolCloud = null;
 let toolpathCloud = null;
-let worker = null;
+let terrainWorker = null;
+let toolWorker = null;
+let toolpathWorker = null;
 
 // Store terrain and tool data for toolpath generation
 let terrainData = null;
 let toolData = null;
 let toolFile = null;
-let pendingToolLoad = false; // Flag to indicate tool is being loaded next
 
 // Timing data
 let timingData = {
@@ -165,18 +166,28 @@ function initScene() {
             // Clear tool data so it needs to be regenerated
             toolData = null;
 
-            // Recompute terrain
-            processFile(lastLoadedFile);
+            // Recompute terrain - need to read file fresh
+            console.log('Recomputing terrain with step size:', STEP_SIZE, 'mm');
+            const terrainReader = new FileReader();
+            terrainReader.onload = function(e) {
+                terrainWorker.postMessage({
+                    type: 'process-stl',
+                    data: {
+                        buffer: e.target.result,
+                        stepSize: STEP_SIZE,
+                        filterMode: 0 // FILTER_UPWARD_FACING for terrain
+                    }
+                }, [e.target.result]);
+            };
+            terrainReader.readAsArrayBuffer(lastLoadedFile);
 
-            // If tool was loaded, recompute it too AFTER terrain finishes
+            // If tool was loaded, recompute it too
             if (toolFile) {
                 console.log('Recomputing tool with step size:', STEP_SIZE, 'mm');
 
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    // Set flag right before sending to worker
-                    pendingToolLoad = true;
-                    worker.postMessage({
+                const toolReader = new FileReader();
+                toolReader.onload = function(e) {
+                    toolWorker.postMessage({
                         type: 'process-stl',
                         data: {
                             buffer: e.target.result,
@@ -185,7 +196,7 @@ function initScene() {
                         }
                     }, [e.target.result]);
                 };
-                reader.readAsArrayBuffer(toolFile);
+                toolReader.readAsArrayBuffer(toolFile);
             }
         }
     });
@@ -207,16 +218,57 @@ function onWindowResize() {
 }
 
 // Web Worker setup
-function initWorker() {
-    worker = new Worker('worker.js');
+function initWorkers() {
+    // Terrain worker
+    terrainWorker = new Worker('worker.js');
+    terrainWorker.onmessage = function(e) {
+        const { type, data, message } = e.data;
+        console.log('Terrain worker received message:', type);
 
-    worker.onmessage = function(e) {
+        switch (type) {
+            case 'wasm-ready':
+                console.log('Terrain worker WASM ready');
+                break;
+
+            case 'status':
+                console.log('Terrain worker status:', message);
+                updateStatus(message);
+                break;
+
+            case 'conversion-complete':
+                console.log('Terrain worker: conversion complete, points:', data.pointCount);
+                terrainData = data;
+                displayPointCloud(data);
+                updateStatus('Terrain complete');
+
+                // Store timing
+                if (e.data.conversionTime !== undefined) {
+                    timingData.terrainConversion = e.data.conversionTime;
+                    updateTimingPanel();
+                }
+                break;
+
+            case 'error':
+                console.error('Terrain worker error:', message);
+                updateStatus('Error: ' + message);
+                alert('Error: ' + message);
+                break;
+        }
+    };
+
+    terrainWorker.onerror = function(error) {
+        console.error('Terrain worker error:', error);
+        updateStatus('Terrain worker error');
+    };
+
+    // Tool worker
+    toolWorker = new Worker('worker.js');
+    toolWorker.onmessage = function(e) {
         const { type, data, message } = e.data;
 
         switch (type) {
             case 'wasm-ready':
-                console.log('WASM module ready');
-                updateStatus('Ready');
+                console.log('Tool worker WASM ready');
                 break;
 
             case 'status':
@@ -224,32 +276,46 @@ function initWorker() {
                 break;
 
             case 'conversion-complete':
-                if (pendingToolLoad) {
-                    // This is tool data, don't replace terrain
-                    toolData = data;
-                    console.log('Tool loaded:', data.pointCount, 'points');
-                    pendingToolLoad = false;
+                toolData = data;
+                console.log('Tool loaded:', data.pointCount, 'points');
 
-                    // Store timing
-                    if (e.data.conversionTime !== undefined) {
-                        timingData.toolConversion = e.data.conversionTime;
-                        updateTimingPanel();
-                    }
-
-                    // Display tool above terrain
-                    displayTool(data);
-                } else {
-                    // This is terrain data
-                    terrainData = data;
-                    displayPointCloud(data);
-                    updateStatus('Complete');
-
-                    // Store timing
-                    if (e.data.conversionTime !== undefined) {
-                        timingData.terrainConversion = e.data.conversionTime;
-                        updateTimingPanel();
-                    }
+                // Store timing
+                if (e.data.conversionTime !== undefined) {
+                    timingData.toolConversion = e.data.conversionTime;
+                    updateTimingPanel();
                 }
+
+                // Display tool above terrain
+                displayTool(data);
+                updateStatus('Tool complete');
+                break;
+
+            case 'error':
+                console.error('Tool worker error:', message);
+                updateStatus('Error: ' + message);
+                alert('Error: ' + message);
+                break;
+        }
+    };
+
+    toolWorker.onerror = function(error) {
+        console.error('Tool worker error:', error);
+        updateStatus('Tool worker error');
+    };
+
+    // Toolpath worker
+    toolpathWorker = new Worker('worker.js');
+    toolpathWorker.onmessage = function(e) {
+        const { type, data, message } = e.data;
+
+        switch (type) {
+            case 'wasm-ready':
+                console.log('Toolpath worker WASM ready');
+                updateStatus('Ready');
+                break;
+
+            case 'status':
+                updateStatus(message);
                 break;
 
             case 'toolpath-complete':
@@ -265,16 +331,16 @@ function initWorker() {
                 break;
 
             case 'error':
-                console.error('Worker error:', message);
+                console.error('Toolpath worker error:', message);
                 updateStatus('Error: ' + message);
                 alert('Error: ' + message);
                 break;
         }
     };
 
-    worker.onerror = function(error) {
-        console.error('Worker error:', error);
-        updateStatus('Worker error');
+    toolpathWorker.onerror = function(error) {
+        console.error('Toolpath worker error:', error);
+        updateStatus('Toolpath worker error');
     };
 }
 
@@ -613,10 +679,10 @@ function processFile(file) {
         const buffer = e.target.result;
         console.log('File loaded, buffer size:', buffer.byteLength);
 
-        // Send to worker for processing
+        // Send to terrain worker for processing
         // Terrain uses upward-facing filter (0)
-        console.log('Sending to worker...');
-        worker.postMessage({
+        console.log('Sending to terrain worker...');
+        terrainWorker.postMessage({
             type: 'process-stl',
             data: {
                 buffer: buffer,
@@ -624,7 +690,7 @@ function processFile(file) {
                 filterMode: 0 // FILTER_UPWARD_FACING for terrain
             }
         }, [buffer]); // Transfer buffer ownership
-        console.log('Message sent to worker');
+        console.log('Message sent to terrain worker');
     };
 
     reader.onerror = function() {
@@ -692,9 +758,8 @@ toolFileInput.addEventListener('change', async (e) => {
             try {
                 const buffer = await file.arrayBuffer();
 
-                // Set flag right before sending to worker
-                pendingToolLoad = true;
-                worker.postMessage({
+                // Send to tool worker
+                toolWorker.postMessage({
                     type: 'process-stl',
                     data: {
                         buffer: buffer,
@@ -737,7 +802,7 @@ generateToolpathBtn.addEventListener('click', async () => {
         console.log('Generating toolpath with X step:', xStep, 'Y step:', yStep, 'Z floor:', zFloor, 'Grid step:', STEP_SIZE);
         updateStatus('Generating toolpath...');
 
-        worker.postMessage({
+        toolpathWorker.postMessage({
             type: 'generate-toolpath',
             data: {
                 terrainPoints: terrainData.positions,
@@ -773,4 +838,4 @@ clearToolpathBtn.addEventListener('click', () => {
 
 // Initialize
 initScene();
-initWorker();
+initWorkers();
