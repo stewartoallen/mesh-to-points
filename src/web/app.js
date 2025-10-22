@@ -21,6 +21,7 @@ const toolFilenameEl = document.getElementById('tool-filename');
 const xStepInput = document.getElementById('x-step-input');
 const yStepInput = document.getElementById('y-step-input');
 const zFloorInput = document.getElementById('z-floor-input');
+const generatorVersionSelect = document.getElementById('generator-version');
 const generateToolpathBtn = document.getElementById('generate-toolpath-btn');
 const clearToolpathBtn = document.getElementById('clear-toolpath-btn');
 
@@ -802,6 +803,8 @@ generateToolpathBtn.addEventListener('click', async () => {
         console.log('Generating toolpath with X step:', xStep, 'Y step:', yStep, 'Z floor:', zFloor, 'Grid step:', STEP_SIZE);
         updateStatus('Generating toolpath...');
 
+        const generatorVersion = generatorVersionSelect.value;
+
         toolpathWorker.postMessage({
             type: 'generate-toolpath',
             data: {
@@ -810,7 +813,8 @@ generateToolpathBtn.addEventListener('click', async () => {
                 xStep: xStep,
                 yStep: yStep,
                 oobZ: zFloor,
-                gridStep: STEP_SIZE
+                gridStep: STEP_SIZE,
+                version: generatorVersion
             }
         });
 

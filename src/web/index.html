@@ -53,6 +53,13 @@
                     <input type="number" id="z-floor-input" value="-100" step="10">
                     <span class="unit">mm</span>
                 </div>
+                <div class="step-control">
+                    <label for="generator-version">Generator:</label>
+                    <select id="generator-version">
+                        <option value="v2">V2 (Height Map)</option>
+                        <option value="v1">V1 (Point Cloud)</option>
+                    </select>
+                </div>
                 <button id="generate-toolpath-btn" class="generate-btn" disabled>Generate Toolpath</button>
                 <button id="clear-toolpath-btn" class="clear-btn" disabled>Clear Toolpath</button>
             </div>

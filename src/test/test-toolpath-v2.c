@@ -125,19 +125,6 @@ int main(int argc, char** argv) {
            (double)map_time / CLOCKS_PER_SEC);
     printf("Tool map: %d x %d\n", tool_map->width, tool_map->height);
 
-    // Print some tool Z values to understand the data
-    printf("Tool Z values (relative to tip at Z=0):\n");
-    int sample_count = 0;
-    for (int y = 0; y < tool_map->height && sample_count < 5; y++) {
-        for (int x = 0; x < tool_map->width && sample_count < 5; x++) {
-            float z = tool_map->z_grid[y * tool_map->width + x];
-            if (!isnan(z)) {
-                printf("  tool[%d,%d] = %.2f\n", x, y, z);
-                sample_count++;
-            }
-        }
-    }
-    printf("Tool Z range: min=%.2f, max=%.2f\n", tool_map->min_z, tool_map->max_z);
 
     // Generate toolpath
     printf("\n--- Generating Toolpath (V2) ---\n");
@@ -152,11 +139,6 @@ int main(int argc, char** argv) {
            (double)path_time / CLOCKS_PER_SEC,
            (double)path_time / CLOCKS_PER_SEC * 1000.0);
 
-    // Sample some path values
-    printf("\nFirst 10 path Z values:\n");
-    for (int i = 0; i < 10 && i < path->points_per_line * path->num_scanlines; i++) {
-        printf("  [%d]: %.2f\n", i, path->path_data[i]);
-    }
 
     // Cleanup
     free_toolpath(path);

@@ -195,16 +195,6 @@ float calculate_tool_height_at_position(HeightMap* terrain, HeightMap* tool,
         }
     }
 
-    // Debug disabled for performance
-    // static int debug_count = 0;
-    // if (debug_count < 3) {
-    //     if (valid_collisions > 0) {
-    //         printf("DEBUG[%d]: tool_x=%d, tool_y=%d, valid_collisions=%d, min_delta=%.2f, result=%.2f\n",
-    //                debug_count, tool_x, tool_y, valid_collisions, min_delta, -min_delta);
-    //         debug_count++;
-    //     }
-    // }
-
     // If no valid collision found, tool is completely off terrain
     if (min_delta == FLT_MAX) {
         return oob_z;
