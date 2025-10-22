@@ -84,35 +84,61 @@ Browser WASM is approximately 1.5× slower than native C compilation.
 /
 ├── src/
 │   ├── web/
-│   │   ├── index.html      - Main HTML page with drag/drop interface
-│   │   ├── app.js          - Three.js scene setup and main application logic
-│   │   ├── worker.js       - Web Worker for STL processing
-│   │   └── style.css       - Application styling
+│   │   ├── index.html              - Main HTML page with drag/drop interface
+│   │   ├── app.js                  - Three.js scene setup and main application logic
+│   │   ├── worker.js               - Web Worker for STL processing
+│   │   ├── style.css               - Application styling
+│   │   ├── mesh-converter.wasm     - Compiled mesh conversion module
+│   │   └── toolpath-generator.wasm - Compiled toolpath generation module
 │   ├── wasm/
-│   │   ├── mesh-converter.c     - C source for mesh conversion algorithm
-│   │   └── mesh-converter-lib.c - WASM library implementation
+│   │   ├── mesh-converter.c        - C wrapper for mesh conversion
+│   │   ├── mesh-converter-lib.c    - Mesh conversion algorithm implementation
+│   │   ├── mesh-converter-lib.h    - Shared header with filter mode constants
+│   │   └── toolpath-generator.c    - CNC toolpath generation algorithm
 │   └── test/
-│       └── test-converter-new.c - Native C test program
+│       ├── test-converter-new.c    - Native C test for mesh conversion
+│       ├── test-toolpath.c         - Native C test for toolpath generation
+│       └── generate-hemisphere.js  - Node.js script to generate test tool STL
 ├── benchmark/
-│   ├── fixtures/           - Test STL files
-│   └── versions/           - Historical algorithm versions
-├── notes/                  - Detailed documentation and session notes
-├── package.json            - Project metadata
-└── README.md               - This file (project documentation)
+│   ├── fixtures/                   - Test STL files
+│   └── versions/                   - Historical algorithm versions
+├── notes/                          - Detailed documentation and session notes
+├── package.json                    - Project metadata and build scripts
+└── README.md                       - This file (project documentation)
 ```
 
 ## WebAssembly Interface
 
-### C Function Signature
+### Mesh Converter Module
+
 ```c
 // Converts triangle mesh to point cloud via XY rastering
 // Parameters:
 //   - triangles: flat array of triangle vertices (x,y,z for each vertex)
 //   - triangle_count: number of triangles
-//   - step_size: XY raster step in mm (e.g., 0.05)
+//   - step_size: XY raster step in mm (e.g., 0.5)
 //   - out_point_count: pointer to store resulting point count
+//   - filter_mode: 0=upward-facing (terrain), 1=downward-facing (tool)
 // Returns: pointer to flat array of point positions
-float* convert_to_point_mesh(float* triangles, int triangle_count, float step_size, int* out_point_count);
+float* convert_to_point_mesh(float* triangles, int triangle_count, float step_size,
+                              int* out_point_count, int filter_mode);
+```
+
+### Toolpath Generator Module
+
+```c
+// Create indexed 2D grid from point cloud
+PointGrid* create_grid(float* points, int point_count);
+
+// Create tool cloud with offsets relative to lowest Z (tool tip)
+ToolCloud* create_tool(float* points, int point_count, float grid_step);
+
+// Generate toolpath by scanning tool over terrain
+// Parameters:
+//   - x_step, y_step: grid point intervals for scanning
+//   - oob_z: Z value for out-of-bounds areas
+ToolPath* generate_path(PointGrid* terrain, ToolCloud* tool,
+                        int x_step, int y_step, float oob_z);
 ```
 
 ## Development Notes
@@ -122,11 +148,25 @@ float* convert_to_point_mesh(float* triangles, int triangle_count, float step_si
 Requires [Emscripten](https://emscripten.org/docs/getting_started/downloads.html) to be installed.
 
 ```bash
-# Compile C to WASM with standalone mode
-emcc mesh-converter.c -o mesh-converter.wasm \
+# Build both WASM modules
+npm run build:wasm
+
+# Or compile individually:
+
+# Mesh converter
+emcc src/wasm/mesh-converter.c -o src/web/mesh-converter.wasm \
   -s WASM=1 \
   -s STANDALONE_WASM \
   -s EXPORTED_FUNCTIONS='["_convert_to_point_mesh","_get_bounds","_free_output","_malloc","_free"]' \
+  -s ALLOW_MEMORY_GROWTH=1 \
+  -O3 \
+  --no-entry
+
+# Toolpath generator
+emcc src/wasm/toolpath-generator.c -o src/web/toolpath-generator.wasm \
+  -s WASM=1 \
+  -s STANDALONE_WASM \
+  -s EXPORTED_FUNCTIONS='["_create_grid","_create_tool","_generate_path","_get_path_dimensions","_copy_path_data","_free_point_grid","_free_tool_cloud","_free_toolpath","_malloc","_free"]' \
   -s ALLOW_MEMORY_GROWTH=1 \
   -O3 \
   --no-entry
@@ -147,26 +187,32 @@ See [QUICKSTART.md](QUICKSTART.md) for detailed setup and testing instructions.
 
 ### Testing
 
-Two test programs are available for validation:
+Test programs are available for validation:
 
-**Native C test:**
+**Mesh Converter (Native C):**
 ```bash
-gcc test-converter.c -o test-converter -lm -O2
-./test-converter inner.stl 0.05
+gcc src/test/test-converter-new.c src/wasm/mesh-converter-lib.c -o test-converter -lm -O2
+./test-converter benchmark/fixtures/inner.stl 0.5
 ```
 
-**WASM test (Node.js):**
+**Toolpath Generator (Native C):**
 ```bash
-node test-wasm.js
+# Generate test tool
+node src/test/generate-hemisphere.js
+
+# Compile and run test
+gcc src/test/test-toolpath.c src/wasm/toolpath-generator.c -o test-toolpath -lm -O2
+./test-toolpath benchmark/fixtures/inner.stl src/test/5mm-hemisphere.stl
 ```
 
-Both tests validate the algorithm and WASM integration without requiring a browser. See QUICKSTART.md for more details.
+Both tests validate the algorithms without requiring a browser. See QUICKSTART.md for more details.
 
 ## Future Enhancements
-- [ ] Adjustable step size via UI
+- [x] ~~Adjustable step size via UI~~ (Implemented: 0.05mm - 1.0mm with recompute button)
 - [ ] **Spatial acceleration structures** (BVH, octree, or uniform grid) to reduce O(n×m) to O(n×log(m))
 - [ ] Progressive rendering (start coarse, refine over time)
 - [ ] Multiple rastering strategies (adaptive sampling, importance sampling)
-- [ ] Export point cloud formats
-- [ ] Support for other 3D file formats
+- [ ] Export point cloud and toolpath formats (G-code, PLY, etc.)
+- [ ] Support for other 3D file formats (OBJ, 3MF)
 - [ ] JS-owned memory buffers to avoid copies and enable shared buffers with Three.js
+- [ ] Adaptive toolpath strategies (constant scallop height, contour following)
