@@ -55,16 +55,23 @@ Browser WASM is approximately 1.5× slower than native C compilation.
 
 ```
 /
-├── index.html          - Main HTML page with drag/drop interface
-├── app.js              - Three.js scene setup and main application logic
-├── worker.js           - Web Worker for STL processing
-├── mesh-converter.c    - C source for mesh conversion algorithm
-├── mesh-converter.wasm - Compiled WebAssembly module
-├── style.css           - Application styling
-├── test-converter.c    - Native C test program
-├── test-wasm.js        - Node.js WASM test program
-├── README.md           - This file (project documentation)
-└── QUICKSTART.md       - Quick start and testing guide
+├── src/
+│   ├── web/
+│   │   ├── index.html      - Main HTML page with drag/drop interface
+│   │   ├── app.js          - Three.js scene setup and main application logic
+│   │   ├── worker.js       - Web Worker for STL processing
+│   │   └── style.css       - Application styling
+│   ├── wasm/
+│   │   ├── mesh-converter.c     - C source for mesh conversion algorithm
+│   │   └── mesh-converter-lib.c - WASM library implementation
+│   └── test/
+│       └── test-converter-new.c - Native C test program
+├── benchmark/
+│   ├── fixtures/           - Test STL files
+│   └── versions/           - Historical algorithm versions
+├── notes/                  - Detailed documentation and session notes
+├── package.json            - Project metadata
+└── README.md               - This file (project documentation)
 ```
 
 ## WebAssembly Interface
