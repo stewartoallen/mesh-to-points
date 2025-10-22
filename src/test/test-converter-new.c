@@ -85,7 +85,7 @@ int main(int argc, char* argv[]) {
     // Convert to point mesh using shared library
     int point_count = 0;
     clock_t convert_start = clock();
-    float* points = convert_to_point_mesh(stl.positions, stl.triangle_count, step_size, &point_count);
+    float* points = convert_to_point_mesh(stl.positions, stl.triangle_count, step_size, &point_count, FILTER_UPWARD_FACING);
     clock_t convert_end = clock();
 
     printf("Generated %d points in %.3f seconds\n",
