@@ -288,8 +288,9 @@ ToolPath* generate_toolpath(PointGrid* terrain, ToolCloud* tool, int x_step, int
     path->out_of_bounds_z = oob_z;
 
     // Calculate number of scan lines and points per line
-    path->num_scanlines = (terrain->height / y_step) + 1;
-    path->points_per_line = (terrain->width / x_step) + 1;
+    // Start at 0, step by step_size, stop before we go out of bounds
+    path->num_scanlines = (terrain->height + y_step - 1) / y_step;
+    path->points_per_line = (terrain->width + x_step - 1) / x_step;
 
     // Allocate scanlines
     path->scanlines = (float**)malloc(sizeof(float*) * path->num_scanlines);
