@@ -187,10 +187,10 @@ body {
     color: #666666;
 }
 
-/* Info Panel */
+/* Info Panel (bottom-left) */
 .info {
     position: absolute;
-    left: 80px;
+    left: 20px;
     bottom: 20px;
     background: rgba(0, 0, 0, 0.8);
     backdrop-filter: blur(10px);
@@ -405,6 +405,60 @@ body {
 .clear-btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
+}
+
+/* Timing Panel (bottom-right) */
+.timing-panel {
+    position: absolute;
+    right: 20px;
+    bottom: 20px;
+    background: rgba(0, 0, 0, 0.8);
+    backdrop-filter: blur(10px);
+    border: 1px solid #333333;
+    border-radius: 8px;
+    padding: 16px;
+    min-width: 240px;
+    z-index: 100;
+    transition: opacity 0.3s ease;
+}
+
+.timing-panel.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.timing-panel h4 {
+    font-size: 14px;
+    color: #ff6400;
+    margin-bottom: 12px;
+    font-weight: 600;
+}
+
+.timing-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid #2a2a2a;
+}
+
+.timing-item:last-child {
+    border-bottom: none;
+}
+
+.timing-label {
+    font-weight: 500;
+    color: #aaaaaa;
+    font-size: 13px;
+}
+
+.timing-value {
+    color: #ffffff;
+    font-size: 13px;
+    font-family: 'Monaco', 'Courier New', monospace;
+    text-align: right;
+    flex: 1;
+    margin-left: 16px;
 }
 
 /* Loading animation */

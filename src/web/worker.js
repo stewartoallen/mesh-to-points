@@ -324,7 +324,8 @@ self.onmessage = async function(e) {
 
                 self.postMessage({
                     type: 'conversion-complete',
-                    data: result
+                    data: result,
+                    conversionTime: conversionTime
                 }, [result.positions.buffer]); // Transfer ownership
 
                 console.log('Worker: result sent to main thread');
@@ -344,7 +345,8 @@ self.onmessage = async function(e) {
 
                 self.postMessage({
                     type: 'toolpath-complete',
-                    data: pathResult
+                    data: pathResult,
+                    generationTime: pathTime
                 }, [pathResult.pathData.buffer]); // Transfer ownership
 
                 console.log('Worker: toolpath result sent to main thread');

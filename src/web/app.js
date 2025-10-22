@@ -24,12 +24,19 @@ const zFloorInput = document.getElementById('z-floor-input');
 const generateToolpathBtn = document.getElementById('generate-toolpath-btn');
 const clearToolpathBtn = document.getElementById('clear-toolpath-btn');
 
+// Timing panel elements
+const timingPanel = document.getElementById('timing-panel');
+const timingTerrainEl = document.getElementById('timing-terrain');
+const timingToolEl = document.getElementById('timing-tool');
+const timingToolpathEl = document.getElementById('timing-toolpath');
+
 // Store last loaded file for recompute
 let lastLoadedFile = null;
 
 // Three.js scene setup
 let scene, camera, renderer, controls;
 let pointCloud = null;
+let toolCloud = null;
 let toolpathCloud = null;
 let worker = null;
 
@@ -38,6 +45,13 @@ let terrainData = null;
 let toolData = null;
 let toolFile = null;
 let pendingToolLoad = false; // Flag to indicate tool is being loaded next
+
+// Timing data
+let timingData = {
+    terrainConversion: null,
+    toolConversion: null,
+    toolpathGeneration: null
+};
 
 function initScene() {
     // Scene
@@ -132,6 +146,22 @@ function initScene() {
                 clearToolpathBtn.disabled = true;
             }
 
+            // Clear tool visualization
+            if (toolCloud) {
+                scene.remove(toolCloud);
+                toolCloud.geometry.dispose();
+                toolCloud.material.dispose();
+                toolCloud = null;
+            }
+
+            // Reset timing data
+            timingData.terrainConversion = null;
+            timingData.toolConversion = null;
+            timingData.toolpathGeneration = null;
+            timingTerrainEl.textContent = '-';
+            timingToolEl.textContent = '-';
+            timingToolpathEl.textContent = '-';
+
             // Clear tool data so it needs to be regenerated
             toolData = null;
 
@@ -199,11 +229,26 @@ function initWorker() {
                     toolData = data;
                     console.log('Tool loaded:', data.pointCount, 'points');
                     pendingToolLoad = false;
+
+                    // Store timing
+                    if (e.data.conversionTime !== undefined) {
+                        timingData.toolConversion = e.data.conversionTime;
+                        updateTimingPanel();
+                    }
+
+                    // Display tool above terrain
+                    displayTool(data);
                 } else {
                     // This is terrain data
                     terrainData = data;
                     displayPointCloud(data);
                     updateStatus('Complete');
+
+                    // Store timing
+                    if (e.data.conversionTime !== undefined) {
+                        timingData.terrainConversion = e.data.conversionTime;
+                        updateTimingPanel();
+                    }
                 }
                 break;
 
@@ -211,6 +256,12 @@ function initWorker() {
                 displayToolpath(data);
                 updateStatus('Toolpath complete');
                 generateToolpathBtn.disabled = false;
+
+                // Store timing
+                if (e.data.generationTime !== undefined) {
+                    timingData.toolpathGeneration = e.data.generationTime;
+                    updateTimingPanel();
+                }
                 break;
 
             case 'error':
@@ -332,6 +383,102 @@ function formatBounds(vec) {
     return `(${vec.x.toFixed(2)}, ${vec.y.toFixed(2)}, ${vec.z.toFixed(2)})`;
 }
 
+// Display tool above terrain
+function displayTool(data) {
+    const { positions, pointCount, bounds } = data;
+    console.log('displayTool: received', pointCount, 'points');
+
+    // Remove existing tool cloud
+    if (toolCloud) {
+        scene.remove(toolCloud);
+        toolCloud.geometry.dispose();
+        toolCloud.material.dispose();
+    }
+
+    if (!terrainData || !terrainData.bounds) {
+        console.warn('No terrain data available, cannot position tool');
+        return;
+    }
+
+    // Position tool so its lowest point is at highest terrain point + 20mm
+    const terrainBounds = terrainData.bounds;
+    const toolBounds = bounds;
+
+    // Find highest terrain Z (after rotation, this is Y in scene coordinates)
+    const highestTerrainZ = terrainBounds.max.z;
+
+    // Find lowest tool point Z
+    const lowestToolZ = toolBounds.min.z;
+
+    // Calculate offset: we want lowestToolZ + offset = highestTerrainZ + 20
+    const zOffset = highestTerrainZ + 20 - lowestToolZ;
+
+    console.log('displayTool: terrain max Z:', highestTerrainZ, 'tool min Z:', lowestToolZ, 'offset:', zOffset);
+
+    // Create offset positions
+    const offsetPositions = new Float32Array(positions.length);
+    for (let i = 0; i < positions.length; i += 3) {
+        offsetPositions[i] = positions[i];     // X
+        offsetPositions[i + 1] = positions[i + 1]; // Y
+        offsetPositions[i + 2] = positions[i + 2] + zOffset; // Z + offset
+    }
+
+    // Create geometry
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(offsetPositions, 3));
+
+    // Color: semi-transparent yellow/gold
+    const colors = new Float32Array(pointCount * 3);
+    const color = new THREE.Color(0xffaa00); // Gold/yellow
+    for (let i = 0; i < pointCount; i++) {
+        colors[i * 3] = color.r;
+        colors[i * 3 + 1] = color.g;
+        colors[i * 3 + 2] = color.b;
+    }
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    // Calculate point size
+    const pointSize = STEP_SIZE * 1.1;
+
+    // Create material with transparency
+    const material = new THREE.PointsMaterial({
+        size: pointSize,
+        vertexColors: true,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.6
+    });
+
+    // Create point cloud
+    toolCloud = new THREE.Points(geometry, material);
+
+    // Rotate to match terrain orientation
+    toolCloud.rotation.x = -Math.PI / 2;
+
+    scene.add(toolCloud);
+    console.log('Tool displayed above terrain at Z offset:', zOffset);
+}
+
+// Update timing panel
+function updateTimingPanel() {
+    if (timingData.terrainConversion !== null) {
+        timingTerrainEl.textContent = timingData.terrainConversion.toFixed(2) + ' ms';
+    }
+    if (timingData.toolConversion !== null) {
+        timingToolEl.textContent = timingData.toolConversion.toFixed(2) + ' ms';
+    }
+    if (timingData.toolpathGeneration !== null) {
+        timingToolpathEl.textContent = timingData.toolpathGeneration.toFixed(2) + ' ms';
+    }
+
+    // Show panel if any timing data exists
+    if (timingData.terrainConversion !== null ||
+        timingData.toolConversion !== null ||
+        timingData.toolpathGeneration !== null) {
+        timingPanel.classList.remove('hidden');
+    }
+}
+
 // Display toolpath in scene
 function displayToolpath(data) {
     console.log('displayToolpath: received data', data);
@@ -343,6 +490,8 @@ function displayToolpath(data) {
         toolpathCloud.geometry.dispose();
         toolpathCloud.material.dispose();
     }
+
+    // Keep tool visible (it stays at the start position)
 
     // Get terrain bounds to map grid back to world space
     if (!terrainData || !terrainData.bounds) {
@@ -529,67 +678,56 @@ fileInput.addEventListener('change', (e) => {
 });
 
 // Toolpath UI event handlers
-toolFileInput.addEventListener('change', (e) => {
+toolFileInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (file) {
         toolFile = file;
         toolFilenameEl.textContent = file.name;
 
-        // Enable generate button if we have terrain
+        // Convert tool immediately
         if (terrainData) {
-            generateToolpathBtn.disabled = false;
+            console.log('Converting tool STL:', file.name);
+            updateStatus('Converting tool...');
+
+            try {
+                const buffer = await file.arrayBuffer();
+
+                // Set flag right before sending to worker
+                pendingToolLoad = true;
+                worker.postMessage({
+                    type: 'process-stl',
+                    data: {
+                        buffer: buffer,
+                        stepSize: STEP_SIZE,
+                        filterMode: 1 // FILTER_DOWNWARD_FACING for tool
+                    }
+                }, [buffer]);
+
+                // Enable generate button
+                generateToolpathBtn.disabled = false;
+            } catch (error) {
+                console.error('Error loading tool:', error);
+                alert('Error loading tool: ' + error.message);
+            }
+        } else {
+            alert('Please load terrain first');
         }
     }
 });
 
 generateToolpathBtn.addEventListener('click', async () => {
-    if (!terrainData || !toolFile) {
+    if (!terrainData || !toolData) {
         alert('Please load both terrain and tool STL files first');
         return;
     }
 
-    console.log('Loading tool STL:', toolFile.name);
-    updateStatus('Converting tool...');
+    console.log('Generating toolpath...');
+    updateStatus('Generating toolpath...');
 
     // Disable button during processing
     generateToolpathBtn.disabled = true;
 
     try {
-        // Read tool file
-        const buffer = await toolFile.arrayBuffer();
-
-        // Convert tool STL to points using worker
-        const convertTool = new Promise((resolve, reject) => {
-            const tempHandler = function(e) {
-                const { type, data, message } = e.data;
-
-                if (type === 'conversion-complete' && toolData) {
-                    // Tool data was set by main handler
-                    console.log('Tool converted:', toolData.pointCount, 'points');
-                    worker.removeEventListener('message', tempHandler);
-                    resolve();
-                } else if (type === 'error') {
-                    pendingToolLoad = false;
-                    worker.removeEventListener('message', tempHandler);
-                    reject(new Error(message));
-                }
-            };
-
-            worker.addEventListener('message', tempHandler);
-
-            // Set flag right before sending to worker
-            pendingToolLoad = true;
-            worker.postMessage({
-                type: 'process-stl',
-                data: {
-                    buffer: buffer,
-                    stepSize: STEP_SIZE,
-                    filterMode: 1 // FILTER_DOWNWARD_FACING for tool
-                }
-            }, [buffer]);
-        });
-
-        await convertTool;
 
         // Now generate toolpath
         const xStep = parseInt(xStepInput.value);
@@ -629,6 +767,7 @@ clearToolpathBtn.addEventListener('click', () => {
         toolpathCloud = null;
         updateStatus('Toolpath cleared');
         clearToolpathBtn.disabled = true;
+        // Tool remains visible at its start position
     }
 });
 
