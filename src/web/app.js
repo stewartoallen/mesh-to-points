@@ -15,13 +15,29 @@ const statusEl = document.getElementById('status');
 const pointCountEl = document.getElementById('point-count');
 const boundsEl = document.getElementById('bounds');
 
+// Toolpath UI elements
+const toolFileInput = document.getElementById('tool-file-input');
+const toolFilenameEl = document.getElementById('tool-filename');
+const xStepInput = document.getElementById('x-step-input');
+const yStepInput = document.getElementById('y-step-input');
+const zFloorInput = document.getElementById('z-floor-input');
+const generateToolpathBtn = document.getElementById('generate-toolpath-btn');
+const clearToolpathBtn = document.getElementById('clear-toolpath-btn');
+
 // Store last loaded file for recompute
 let lastLoadedFile = null;
 
 // Three.js scene setup
 let scene, camera, renderer, controls;
 let pointCloud = null;
+let toolpathCloud = null;
 let worker = null;
+
+// Store terrain and tool data for toolpath generation
+let terrainData = null;
+let toolData = null;
+let toolFile = null;
+let isLoadingTool = false; // Flag to prevent terrain data from being overwritten
 
 function initScene() {
     // Scene
@@ -112,8 +128,23 @@ function initWorker() {
                 break;
 
             case 'conversion-complete':
-                displayPointCloud(data);
-                updateStatus('Complete');
+                if (isLoadingTool) {
+                    // This is tool data, don't replace terrain
+                    toolData = data;
+                    console.log('Tool loaded:', data.pointCount, 'points');
+                    isLoadingTool = false;
+                } else {
+                    // This is terrain data
+                    terrainData = data;
+                    displayPointCloud(data);
+                    updateStatus('Complete');
+                }
+                break;
+
+            case 'toolpath-complete':
+                displayToolpath(data);
+                updateStatus('Toolpath complete');
+                generateToolpathBtn.disabled = false;
                 break;
 
             case 'error':
@@ -235,6 +266,92 @@ function formatBounds(vec) {
     return `(${vec.x.toFixed(2)}, ${vec.y.toFixed(2)}, ${vec.z.toFixed(2)})`;
 }
 
+// Display toolpath in scene
+function displayToolpath(data) {
+    console.log('displayToolpath: received data', data);
+    const { pathData, numScanlines, pointsPerLine } = data;
+
+    // Remove existing toolpath cloud
+    if (toolpathCloud) {
+        scene.remove(toolpathCloud);
+        toolpathCloud.geometry.dispose();
+        toolpathCloud.material.dispose();
+    }
+
+    // Get terrain bounds to map grid back to world space
+    if (!terrainData || !terrainData.bounds) {
+        console.error('No terrain data available for toolpath visualization');
+        return;
+    }
+
+    const bounds = terrainData.bounds;
+
+    // The toolpath is in grid index space, we need to map it back to world coordinates
+    // The grid step size used for the point cloud
+    const gridStep = STEP_SIZE;
+
+    // Get step sizes used in toolpath generation
+    const xStep = parseInt(xStepInput.value);
+    const yStep = parseInt(yStepInput.value);
+    const zFloor = parseFloat(zFloorInput.value);
+
+    console.log('displayToolpath: bounds', bounds);
+    console.log('displayToolpath: gridStep', gridStep, 'xStep', xStep, 'yStep', yStep);
+    console.log('displayToolpath: scanlines', numScanlines, 'pointsPerLine', pointsPerLine);
+
+    // Create position array for toolpath points
+    const positions = [];
+
+    let pathIdx = 0;
+    for (let iy = 0; iy < numScanlines; iy++) {
+        for (let ix = 0; ix < pointsPerLine; ix++) {
+            const z = pathData[pathIdx++];
+
+            // Map grid indices to world coordinates
+            // The toolpath uses stepped indices (ix*xStep, iy*yStep) in grid space
+            const gridX = ix * xStep;
+            const gridY = iy * yStep;
+
+            // Convert grid indices to world coordinates
+            const worldX = bounds.min.x + gridX * gridStep;
+            const worldY = bounds.min.y + gridY * gridStep;
+
+            // Only add points that are not at the floor level (filter out oob points)
+            if (z > zFloor + 10) { // Filter out oob points (with 10mm margin)
+                positions.push(worldX, worldY, z);
+            }
+        }
+    }
+
+    const positionsArray = new Float32Array(positions);
+    const pointCount = positions.length / 3;
+
+    console.log('displayToolpath: created', pointCount, 'toolpath points');
+    console.log('displayToolpath: sample points (first 3):',
+        positionsArray.slice(0, 9));
+
+    // Create geometry
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positionsArray, 3));
+
+    // Create material - use red/orange color for toolpath
+    const material = new THREE.PointsMaterial({
+        size: gridStep * 3.0, // Larger than terrain points for visibility
+        color: 0xff4400, // Orange-red
+        sizeAttenuation: true
+    });
+
+    // Create point cloud
+    toolpathCloud = new THREE.Points(geometry, material);
+
+    // Apply same rotation as terrain
+    toolpathCloud.rotation.x = -Math.PI / 2;
+
+    scene.add(toolpathCloud);
+
+    console.log('Toolpath visualization complete');
+}
+
 // File handling
 function handleFile(file) {
     console.log('handleFile called with:', file);
@@ -324,6 +441,109 @@ fileInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (file) {
         handleFile(file);
+    }
+});
+
+// Toolpath UI event handlers
+toolFileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) {
+        toolFile = file;
+        toolFilenameEl.textContent = file.name;
+
+        // Enable generate button if we have terrain
+        if (terrainData) {
+            generateToolpathBtn.disabled = false;
+        }
+    }
+});
+
+generateToolpathBtn.addEventListener('click', async () => {
+    if (!terrainData || !toolFile) {
+        alert('Please load both terrain and tool STL files first');
+        return;
+    }
+
+    console.log('Loading tool STL:', toolFile.name);
+    updateStatus('Converting tool...');
+
+    // Disable button during processing
+    generateToolpathBtn.disabled = true;
+
+    try {
+        // Read tool file
+        const buffer = await toolFile.arrayBuffer();
+
+        // Set flag to indicate we're loading tool, not terrain
+        isLoadingTool = true;
+
+        // Convert tool STL to points using worker
+        const convertTool = new Promise((resolve, reject) => {
+            const tempHandler = function(e) {
+                const { type, data, message } = e.data;
+
+                if (type === 'conversion-complete' && toolData) {
+                    // Tool data was set by main handler
+                    console.log('Tool converted:', toolData.pointCount, 'points');
+                    worker.removeEventListener('message', tempHandler);
+                    resolve();
+                } else if (type === 'error') {
+                    isLoadingTool = false;
+                    worker.removeEventListener('message', tempHandler);
+                    reject(new Error(message));
+                }
+            };
+
+            worker.addEventListener('message', tempHandler);
+
+            worker.postMessage({
+                type: 'process-stl',
+                data: {
+                    buffer: buffer,
+                    stepSize: STEP_SIZE
+                }
+            }, [buffer]);
+        });
+
+        await convertTool;
+
+        // Now generate toolpath
+        const xStep = parseInt(xStepInput.value);
+        const yStep = parseInt(yStepInput.value);
+        const zFloor = parseFloat(zFloorInput.value);
+
+        console.log('Generating toolpath with X step:', xStep, 'Y step:', yStep, 'Z floor:', zFloor);
+        updateStatus('Generating toolpath...');
+
+        worker.postMessage({
+            type: 'generate-toolpath',
+            data: {
+                terrainPoints: terrainData.positions,
+                toolPoints: toolData.positions,
+                xStep: xStep,
+                yStep: yStep,
+                oobZ: zFloor
+            }
+        });
+
+        // Enable clear button
+        clearToolpathBtn.disabled = false;
+
+    } catch (error) {
+        console.error('Error generating toolpath:', error);
+        alert('Error generating toolpath: ' + error.message);
+        generateToolpathBtn.disabled = false;
+    }
+});
+
+clearToolpathBtn.addEventListener('click', () => {
+    if (toolpathCloud) {
+        scene.remove(toolpathCloud);
+        toolpathCloud.geometry.dispose();
+        toolpathCloud.material.dispose();
+        toolpathCloud = null;
+        updateStatus('Toolpath cleared');
+        clearToolpathBtn.disabled = true;
     }
 });
 

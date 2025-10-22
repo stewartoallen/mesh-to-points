@@ -17,15 +17,44 @@
         </div>
 
         <div class="controls">
-            <div class="step-size-control">
-                <label for="step-size-select">Detail:</label>
-                <select id="step-size-select">
-                    <option value="1.0">1.0mm (Fast)</option>
-                    <option value="0.5">0.5mm (Good)</option>
-                    <option value="0.1" selected>0.1mm (High)</option>
-                    <option value="0.05">0.05mm (Max)</option>
-                </select>
-                <button id="recompute-btn" class="recompute-btn" disabled>Recompute</button>
+            <div class="control-group">
+                <h3>Terrain</h3>
+                <div class="step-size-control">
+                    <label for="step-size-select">Detail:</label>
+                    <select id="step-size-select">
+                        <option value="1.0">1.0mm (Fast)</option>
+                        <option value="0.5">0.5mm (Good)</option>
+                        <option value="0.1" selected>0.1mm (High)</option>
+                        <option value="0.05">0.05mm (Max)</option>
+                    </select>
+                    <button id="recompute-btn" class="recompute-btn" disabled>Recompute</button>
+                </div>
+            </div>
+
+            <div class="control-group toolpath-controls" id="toolpath-controls">
+                <h3>Toolpath</h3>
+                <div class="tool-file-control">
+                    <label for="tool-file-input">Tool STL:</label>
+                    <input type="file" id="tool-file-input" accept=".stl">
+                    <span id="tool-filename" class="filename-display">None</span>
+                </div>
+                <div class="step-control">
+                    <label for="x-step-input">X Step:</label>
+                    <input type="number" id="x-step-input" value="2" min="1" max="50">
+                    <span class="unit">points</span>
+                </div>
+                <div class="step-control">
+                    <label for="y-step-input">Y Step:</label>
+                    <input type="number" id="y-step-input" value="10" min="1" max="50">
+                    <span class="unit">points</span>
+                </div>
+                <div class="step-control">
+                    <label for="z-floor-input">Z Floor:</label>
+                    <input type="number" id="z-floor-input" value="-100" step="10">
+                    <span class="unit">mm</span>
+                </div>
+                <button id="generate-toolpath-btn" class="generate-btn" disabled>Generate Toolpath</button>
+                <button id="clear-toolpath-btn" class="clear-btn" disabled>Clear Toolpath</button>
             </div>
         </div>
 

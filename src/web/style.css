@@ -190,8 +190,8 @@ body {
 /* Info Panel */
 .info {
     position: absolute;
-    top: 80px;
-    right: 20px;
+    left: 80px;
+    bottom: 20px;
     background: rgba(0, 0, 0, 0.8);
     backdrop-filter: blur(10px);
     border: 1px solid #333333;
@@ -262,6 +262,149 @@ body {
         margin-left: 0;
         margin-top: 4px;
     }
+}
+
+/* Control Groups */
+.control-group {
+    margin-bottom: 16px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid #333333;
+}
+
+.control-group:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+    padding-bottom: 0;
+}
+
+.control-group h3 {
+    font-size: 14px;
+    color: #00ffff;
+    margin-bottom: 12px;
+    font-weight: 600;
+}
+
+/* Toolpath Controls */
+.toolpath-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.tool-file-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.tool-file-control label {
+    font-size: 13px;
+    color: #00ffff;
+    font-weight: 600;
+    min-width: 60px;
+}
+
+.tool-file-control input[type="file"] {
+    font-size: 11px;
+    color: #ffffff;
+    max-width: 150px;
+}
+
+.filename-display {
+    font-size: 11px;
+    color: #888888;
+    font-style: italic;
+}
+
+.step-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.step-control label {
+    font-size: 13px;
+    color: #00ffff;
+    font-weight: 600;
+    min-width: 60px;
+}
+
+.step-control input[type="number"] {
+    width: 60px;
+    padding: 4px 8px;
+    font-size: 13px;
+    background: rgba(0, 0, 0, 0.8);
+    border: 1px solid #00ffff;
+    border-radius: 4px;
+    color: #ffffff;
+    outline: none;
+}
+
+.step-control input[type="number"]:focus {
+    border-color: #00cccc;
+    box-shadow: 0 0 8px rgba(0, 255, 255, 0.3);
+}
+
+.step-control .unit {
+    font-size: 11px;
+    color: #888888;
+}
+
+.generate-btn, .clear-btn {
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    border: 1px solid;
+    border-radius: 6px;
+    cursor: pointer;
+    outline: none;
+    transition: all 0.2s ease;
+    margin-top: 4px;
+}
+
+.generate-btn {
+    background: rgba(255, 100, 0, 0.2);
+    border-color: #ff6400;
+    color: #ff6400;
+}
+
+.generate-btn:hover:not(:disabled) {
+    background: rgba(255, 100, 0, 0.3);
+    box-shadow: 0 0 8px rgba(255, 100, 0, 0.3);
+}
+
+.generate-btn:active:not(:disabled) {
+    background: rgba(255, 100, 0, 0.4);
+    transform: translateY(1px);
+}
+
+.generate-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+    border-color: #666666;
+    color: #666666;
+}
+
+.clear-btn {
+    background: rgba(100, 100, 100, 0.2);
+    border-color: #666666;
+    color: #888888;
+}
+
+.clear-btn:hover:not(:disabled) {
+    background: rgba(100, 100, 100, 0.3);
+    border-color: #888888;
+    color: #aaaaaa;
+}
+
+.clear-btn:active:not(:disabled) {
+    background: rgba(100, 100, 100, 0.4);
+    transform: translateY(1px);
+}
+
+.clear-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
 }
 
 /* Loading animation */
