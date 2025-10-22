@@ -611,8 +611,8 @@ function displayToolpath(data) {
     const pointCount = positions.length / 3;
 
     console.log('displayToolpath: created', pointCount, 'toolpath points');
-    console.log('displayToolpath: first 3 points:', positionsArray.slice(0, 9));
-    console.log('displayToolpath: last 3 points:', positionsArray.slice(-9));
+    // console.log('displayToolpath: first 3 points:', positionsArray.slice(0, 9));
+    // console.log('displayToolpath: last 3 points:', positionsArray.slice(-9));
 
     // Calculate XY range of toolpath
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;

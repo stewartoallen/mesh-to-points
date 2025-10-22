@@ -10,9 +10,10 @@ async function initWasm() {
     if (meshWasm && toolpathWasm) return;
 
     try {
-        // Load mesh converter WASM
-        const meshResponse = await fetch('mesh-converter.wasm');
+        // Load mesh converter WASM (with cache busting)
+        const meshResponse = await fetch('mesh-converter.wasm?v=' + Date.now());
         const meshBinary = await meshResponse.arrayBuffer();
+        console.log('Loaded mesh-converter.wasm:', meshBinary.byteLength, 'bytes');
 
         const importObject = {
             env: {
@@ -36,12 +37,14 @@ async function initWasm() {
             meshWasm.exports._initialize();
         }
 
-        // Load toolpath generator WASM
-        const toolpathResponse = await fetch('toolpath-generator.wasm');
+        // Load toolpath generator WASM (with cache busting)
+        const toolpathResponse = await fetch('toolpath-generator.wasm?v=' + Date.now());
         const toolpathBinary = await toolpathResponse.arrayBuffer();
+        console.log('Loaded toolpath-generator.wasm:', toolpathBinary.byteLength, 'bytes');
         const toolpathResult = await WebAssembly.instantiate(toolpathBinary, importObject);
         toolpathWasm = toolpathResult.instance;
         toolpathMemory = toolpathWasm.exports.memory;
+        console.log('Toolpath WASM exports:', Object.keys(toolpathWasm.exports));
 
         if (toolpathWasm.exports._initialize) {
             toolpathWasm.exports._initialize();
@@ -179,6 +182,7 @@ function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridSte
     const startTime = performance.now();
 
     // Allocate and copy terrain points
+    const t0 = performance.now();
     const terrainSize = terrainPoints.length * 4;
     const terrainPtr = toolpathWasm.exports.malloc(terrainSize);
     const terrainArray = new Float32Array(toolpathMemory.buffer, terrainPtr, terrainPoints.length);
@@ -189,14 +193,20 @@ function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridSte
     const toolPtr = toolpathWasm.exports.malloc(toolSize);
     const toolArray = new Float32Array(toolpathMemory.buffer, toolPtr, toolPoints.length);
     toolArray.set(toolPoints);
+    const t1 = performance.now();
+    console.log('⏱️  Memory copy: ' + (t1 - t0).toFixed(1) + 'ms');
 
     // Create terrain height map
     const terrainPointCount = terrainPoints.length / 3;
     const terrainMapPtr = toolpathWasm.exports.create_terrain_map(terrainPtr, terrainPointCount, gridStep);
+    const t2 = performance.now();
+    console.log('⏱️  Create terrain map: ' + (t2 - t1).toFixed(1) + 'ms');
 
     // Create tool height map
     const toolPointCount = toolPoints.length / 3;
     const toolMapPtr = toolpathWasm.exports.create_tool_map(toolPtr, toolPointCount, gridStep);
+    const t3 = performance.now();
+    console.log('⏱️  Create tool map: ' + (t3 - t2).toFixed(1) + 'ms');
 
     // Get terrain dimensions for verification
     const terrainDimPtr = toolpathWasm.exports.malloc(8);
@@ -207,6 +217,7 @@ function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridSte
     toolpathWasm.exports.get_map_dimensions(toolMapPtr, toolDimPtr, toolDimPtr + 4);
 
     // Generate toolpath
+    const t4 = performance.now();
     const toolpathPtr = toolpathWasm.exports.generate_path(
         terrainMapPtr,
         toolMapPtr,
@@ -214,6 +225,16 @@ function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridSte
         yStep,
         oobZ
     );
+    const t5 = performance.now();
+    console.log('⏱️  Generate path (CORE ALGORITHM): ' + (t5 - t4).toFixed(1) + 'ms');
+
+    // Debug: Read algorithm marker
+    const algorithmMarker = new Int32Array(toolpathMemory.buffer, 0x10000, 1)[0];
+    if (algorithmMarker === -1) {
+        console.log('🔧 Algorithm: DENSE (testing)');
+    } else {
+        console.log('🔧 Algorithm: SPARSE with', algorithmMarker, 'tool points');
+    }
 
     // Get dimensions
     const dimPtr = toolpathWasm.exports.malloc(8); // 2 ints
@@ -229,8 +250,11 @@ function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridSte
 
     const pathData = new Float32Array(toolpathMemory.buffer, pathDataPtr, pathDataSize);
     const result = new Float32Array(pathData);
+    const t6 = performance.now();
+    console.log('⏱️  Copy result back: ' + (t6 - t5).toFixed(1) + 'ms');
 
     const elapsed = performance.now() - startTime;
+    console.log('⏱️  TOTAL: ' + elapsed.toFixed(1) + 'ms');
 
     // Free memory
     toolpathWasm.exports.free(terrainDimPtr);
