@@ -38,6 +38,21 @@ typedef struct {
 } SparseTool;
 
 /**
+ * Tiled terrain - terrain broken into small tiles for cache efficiency
+ * Each tile is small enough to fit in CPU cache
+ */
+typedef struct {
+    float** tiles;      // Array of tile pointers (flat tiles, not 2D)
+    int tile_size;      // Cells per tile edge (e.g., 256 for 256x256)
+    int tiles_x;        // Number of tiles in X direction
+    int tiles_y;        // Number of tiles in Y direction
+    int total_width;    // Original terrain width in cells
+    int total_height;   // Original terrain height in cells
+    float min_z;        // Minimum Z value
+    float max_z;        // Maximum Z value
+} TiledTerrain;
+
+/**
  * Toolpath output - 2D array of tool center Z heights
  */
 typedef struct {
@@ -193,13 +208,178 @@ void free_sparse_tool(SparseTool* tool) {
     }
 }
 
+/**
+ * Convert HeightMap to tiled terrain for better cache performance
+ *
+ * @param map Height map to convert
+ * @param tile_size Size of each tile edge (e.g., 256 for 256x256 tiles)
+ * @return TiledTerrain structure
+ */
+TiledTerrain* create_tiled_terrain(HeightMap* map, int tile_size) {
+    if (!map || tile_size <= 0) return NULL;
+
+    TiledTerrain* tiled = (TiledTerrain*)malloc(sizeof(TiledTerrain));
+
+    tiled->tile_size = tile_size;
+    tiled->total_width = map->width;
+    tiled->total_height = map->height;
+    tiled->min_z = map->min_z;
+    tiled->max_z = map->max_z;
+
+    // Calculate number of tiles needed (round up)
+    tiled->tiles_x = (map->width + tile_size - 1) / tile_size;
+    tiled->tiles_y = (map->height + tile_size - 1) / tile_size;
+
+    // Allocate array of tile pointers
+    int total_tiles = tiled->tiles_x * tiled->tiles_y;
+    tiled->tiles = (float**)malloc(total_tiles * sizeof(float*));
+
+    // Create each tile
+    for (int ty = 0; ty < tiled->tiles_y; ty++) {
+        for (int tx = 0; tx < tiled->tiles_x; tx++) {
+            int tile_idx = ty * tiled->tiles_x + tx;
+
+            // Allocate tile (flat array)
+            tiled->tiles[tile_idx] = (float*)malloc(tile_size * tile_size * sizeof(float));
+
+            // Initialize tile to EMPTY_CELL
+            for (int i = 0; i < tile_size * tile_size; i++) {
+                tiled->tiles[tile_idx][i] = EMPTY_CELL;
+            }
+
+            // Copy data from height map to this tile
+            int start_x = tx * tile_size;
+            int start_y = ty * tile_size;
+
+            for (int local_y = 0; local_y < tile_size; local_y++) {
+                for (int local_x = 0; local_x < tile_size; local_x++) {
+                    int global_x = start_x + local_x;
+                    int global_y = start_y + local_y;
+
+                    // Check if within original map bounds
+                    if (global_x < map->width && global_y < map->height) {
+                        float z = map->z_grid[global_y * map->width + global_x];
+                        tiled->tiles[tile_idx][local_y * tile_size + local_x] = z;
+                    }
+                }
+            }
+        }
+    }
+
+    return tiled;
+}
+
+void free_tiled_terrain(TiledTerrain* tiled) {
+    if (tiled) {
+        if (tiled->tiles) {
+            int total_tiles = tiled->tiles_x * tiled->tiles_y;
+            for (int i = 0; i < total_tiles; i++) {
+                free(tiled->tiles[i]);
+            }
+            free(tiled->tiles);
+        }
+        free(tiled);
+    }
+}
+
+/**
+ * Get terrain Z value from tiled terrain
+ * Returns EMPTY_CELL (NaN) if position is out of bounds or empty
+ * Optimized with bit shifts when tile_size is power of 2
+ */
+static inline float get_tiled_z(TiledTerrain* tiled, int x, int y) {
+    // Check bounds
+    if (x < 0 || x >= tiled->total_width || y < 0 || y >= tiled->total_height) {
+        return EMPTY_CELL;
+    }
+
+    // Calculate which tile this position is in
+    // Use bitshift if tile_size is power of 2, else use division
+    int tile_x, tile_y, local_x, local_y;
+
+    // Check if tile_size is power of 2 (has only one bit set)
+    int is_pow2 = (tiled->tile_size & (tiled->tile_size - 1)) == 0;
+
+    if (is_pow2) {
+        // Fast path: use bit operations
+        int shift = __builtin_ctz(tiled->tile_size);  // Count trailing zeros
+        int mask = tiled->tile_size - 1;
+
+        tile_x = x >> shift;
+        tile_y = y >> shift;
+        local_x = x & mask;
+        local_y = y & mask;
+    } else {
+        // Slow path: use division/modulo
+        tile_x = x / tiled->tile_size;
+        tile_y = y / tiled->tile_size;
+        local_x = x % tiled->tile_size;
+        local_y = y % tiled->tile_size;
+    }
+
+    int tile_idx = tile_y * tiled->tiles_x + tile_x;
+
+    // Return Z value from tile
+    return tiled->tiles[tile_idx][local_y * tiled->tile_size + local_x];
+}
+
 // ============================================================================
 // Toolpath Generation
 // ============================================================================
 
 /**
- * Calculate tool center Z at given position using SPARSE TOOL representation.
- * Iterates through sparse tool points and tests against terrain.
+ * Calculate tool center Z using SPARSE TOOL with TILED TERRAIN (optimized)
+ * Uses tiled terrain for better cache locality
+ *
+ * @param tiled Tiled terrain
+ * @param tool Sparse tool representation
+ * @param tool_x Tool center X position in terrain grid coordinates
+ * @param tool_y Tool center Y position in terrain grid coordinates
+ * @param oob_z Z value to use for out-of-bounds/missing terrain
+ * @return Z height for tool center (tool tip Z position)
+ */
+float calculate_tool_height_tiled(TiledTerrain* tiled, SparseTool* tool,
+                                   int tool_x, int tool_y, float oob_z) {
+    float min_delta = FLT_MAX;
+
+    // For each tool point, test against tiled terrain
+    for (int i = 0; i < tool->count; i++) {
+        // Get tool offset and Z
+        int offset_x = tool->x_offsets[i];
+        int offset_y = tool->y_offsets[i];
+        float tool_z = tool->z_values[i];
+
+        // Calculate terrain position for this tool point
+        int terrain_x = tool_x + offset_x;
+        int terrain_y = tool_y + offset_y;
+
+        // Get terrain Z using tiled lookup
+        float terrain_z = get_tiled_z(tiled, terrain_x, terrain_y);
+        if (isnan(terrain_z)) {
+            // Missing terrain data - skip this tool point
+            continue;
+        }
+
+        // Calculate delta between tool point and terrain
+        float delta = tool_z - terrain_z;
+
+        if (delta < min_delta) {
+            min_delta = delta;
+        }
+    }
+
+    // If no valid collision found, tool is completely off terrain
+    if (min_delta == FLT_MAX) {
+        return oob_z;
+    }
+
+    // Return tool tip Z position (negate min_delta to get absolute Z)
+    return -min_delta;
+}
+
+/**
+ * Calculate tool center Z using SPARSE TOOL with standard HeightMap
+ * Legacy version for non-tiled terrain
  *
  * @param terrain Terrain height map
  * @param tool Sparse tool representation
@@ -254,80 +434,53 @@ float calculate_tool_height_sparse(HeightMap* terrain, SparseTool* tool,
     return -min_delta;
 }
 
+// Old dense algorithm removed - using sparse tool representation only
+
 /**
- * Calculate tool center Z at given position using DENSE TOOL (original).
- * Tests each tool grid cell against corresponding terrain cell.
+ * Generate complete toolpath using TILED terrain (optimized for cache)
  *
- * @param terrain Terrain height map
- * @param tool Tool height map (Z relative to tool tip at Z=0)
- * @param tool_x Tool center X position in terrain grid coordinates
- * @param tool_y Tool center Y position in terrain grid coordinates
- * @param oob_z Z value to use for out-of-bounds/missing terrain
- * @return Z height for tool center (tool tip Z position)
+ * @param tiled Tiled terrain
+ * @param tool Sparse tool representation
+ * @param x_step X step size in grid cells
+ * @param y_step Y step size in grid cells
+ * @param oob_z Z value for out-of-bounds areas
+ * @param tile_size Tile size used for terrain
+ * @return ToolPath structure
  */
-float calculate_tool_height_at_position(HeightMap* terrain, HeightMap* tool,
-                                         int tool_x, int tool_y, float oob_z) {
-    float min_delta = FLT_MAX;
-    int valid_collisions = 0;
+ToolPath* generate_toolpath_tiled(TiledTerrain* tiled, SparseTool* tool,
+                                   int x_step, int y_step, float oob_z) {
+    if (!tiled || !tool) return NULL;
 
-    // Calculate tool grid center position
-    int tool_center_x = tool->width / 2;
-    int tool_center_y = tool->height / 2;
+    ToolPath* path = (ToolPath*)malloc(sizeof(ToolPath));
 
-    // For each cell in tool grid, test against terrain
-    for (int ty = 0; ty < tool->height; ty++) {
-        for (int tx = 0; tx < tool->width; tx++) {
-            // Get tool Z at this grid position
-            float tool_z = tool->z_grid[ty * tool->width + tx];
-            if (isnan(tool_z)) continue; // Skip empty tool cells
+    // Calculate path dimensions
+    path->points_per_line = (tiled->total_width + x_step - 1) / x_step;
+    path->num_scanlines = (tiled->total_height + y_step - 1) / y_step;
 
-            // Calculate terrain position for this tool cell
-            // Integer offset from tool center to this cell
-            int offset_x = tx - tool_center_x;
-            int offset_y = ty - tool_center_y;
+    // Allocate path data
+    int total_points = path->num_scanlines * path->points_per_line;
+    path->path_data = (float*)malloc(total_points * sizeof(float));
 
-            // Terrain position to test
-            int terrain_x = tool_x + offset_x;
-            int terrain_y = tool_y + offset_y;
+    // Generate path by scanning in raster order
+    int path_idx = 0;
+    for (int scanline = 0; scanline < path->num_scanlines; scanline++) {
+        int tool_y = scanline * y_step;
 
-            // Check if terrain position is in bounds
-            if (terrain_x < 0 || terrain_x >= terrain->width ||
-                terrain_y < 0 || terrain_y >= terrain->height) {
-                // Out of bounds - skip this tool point (doesn't constrain)
-                continue;
-            }
+        for (int point = 0; point < path->points_per_line; point++) {
+            int tool_x = point * x_step;
 
-            // Get terrain Z at this position
-            float terrain_z = terrain->z_grid[terrain_y * terrain->width + terrain_x];
-            if (isnan(terrain_z)) {
-                // Missing terrain data - skip this tool point
-                continue;
-            }
-
-            // Calculate delta between tool point and terrain
-            // tool_z is the Z offset of this tool point relative to tool tip (Z=0)
-            // delta = tool_z_offset - terrain_z
-            // This tells us how much to lower the tool tip to avoid collision
-            float delta = tool_z - terrain_z;
-
-            if (delta < min_delta) {
-                min_delta = delta;
-            }
-            valid_collisions++;
+            // Calculate tool center Z using tiled terrain
+            float z = calculate_tool_height_tiled(tiled, tool, tool_x, tool_y, oob_z);
+            path->path_data[path_idx++] = z;
         }
     }
 
-    // If no valid collision found, tool is completely off terrain
-    if (min_delta == FLT_MAX) {
-        return oob_z;
-    }
-
-    // Return tool tip Z position (negate min_delta to get absolute Z)
-    return -min_delta;
+    return path;
 }
 
 /**
  * Generate complete toolpath by scanning SPARSE TOOL over terrain
+ * Legacy version for non-tiled terrain
  *
  * @param terrain Terrain height map
  * @param tool Sparse tool representation
@@ -353,6 +506,61 @@ ToolPath* generate_toolpath_sparse(HeightMap* terrain, SparseTool* tool,
     // Generate path by scanning in raster order
     int path_idx = 0;
     for (int scanline = 0; scanline < path->num_scanlines; scanline++) {
+        int tool_y = scanline * y_step;
+
+        for (int point = 0; point < path->points_per_line; point++) {
+            int tool_x = point * x_step;
+
+            // Calculate tool center Z at this position using sparse algorithm
+            float z = calculate_tool_height_sparse(terrain, tool, tool_x, tool_y, oob_z);
+            path->path_data[path_idx++] = z;
+        }
+    }
+
+    return path;
+}
+
+/**
+ * Generate PARTIAL toolpath for a range of scanlines (for parallelization)
+ *
+ * @param terrain Terrain height map
+ * @param tool Sparse tool representation
+ * @param x_step X step size in grid cells
+ * @param y_step Y step size in grid cells
+ * @param oob_z Z value for out-of-bounds areas
+ * @param start_scanline First scanline to generate (inclusive)
+ * @param end_scanline Last scanline to generate (exclusive)
+ * @return ToolPath structure containing only the specified scanlines
+ */
+ToolPath* generate_toolpath_partial(HeightMap* terrain, SparseTool* tool,
+                                    int x_step, int y_step, float oob_z,
+                                    int start_scanline, int end_scanline) {
+    if (!terrain || !tool) return NULL;
+
+    ToolPath* path = (ToolPath*)malloc(sizeof(ToolPath));
+
+    // Calculate dimensions
+    path->points_per_line = (terrain->width + x_step - 1) / x_step;
+    int total_scanlines = (terrain->height + y_step - 1) / y_step;
+
+    // Clamp scanline range
+    if (start_scanline < 0) start_scanline = 0;
+    if (end_scanline > total_scanlines) end_scanline = total_scanlines;
+    if (start_scanline >= end_scanline) {
+        path->num_scanlines = 0;
+        path->path_data = NULL;
+        return path;
+    }
+
+    path->num_scanlines = end_scanline - start_scanline;
+
+    // Allocate path data for this range only
+    int total_points = path->num_scanlines * path->points_per_line;
+    path->path_data = (float*)malloc(total_points * sizeof(float));
+
+    // Generate path for specified scanline range
+    int path_idx = 0;
+    for (int scanline = start_scanline; scanline < end_scanline; scanline++) {
         int tool_y = scanline * y_step;
 
         for (int point = 0; point < path->points_per_line; point++) {
@@ -395,47 +603,7 @@ ToolPath* generate_toolpath(HeightMap* terrain, HeightMap* tool,
     return path;
 }
 
-/**
- * Generate complete toolpath using DENSE algorithm (kept for testing/comparison)
- * This is the original implementation before sparse optimization
- *
- * @param terrain Terrain height map
- * @param tool Tool height map (Z relative to tool tip)
- * @param x_step X step size in grid cells (how many cells to skip)
- * @param y_step Y step size in grid cells (how many cells to skip)
- * @param oob_z Z value for out-of-bounds areas
- * @return ToolPath structure
- */
-ToolPath* generate_toolpath_dense(HeightMap* terrain, HeightMap* tool,
-                                  int x_step, int y_step, float oob_z) {
-    if (!terrain || !tool) return NULL;
-
-    ToolPath* path = (ToolPath*)malloc(sizeof(ToolPath));
-
-    // Calculate path dimensions
-    path->points_per_line = (terrain->width + x_step - 1) / x_step;
-    path->num_scanlines = (terrain->height + y_step - 1) / y_step;
-
-    // Allocate path data
-    int total_points = path->num_scanlines * path->points_per_line;
-    path->path_data = (float*)malloc(total_points * sizeof(float));
-
-    // Generate path by scanning in raster order
-    int path_idx = 0;
-    for (int scanline = 0; scanline < path->num_scanlines; scanline++) {
-        int tool_y = scanline * y_step;
-
-        for (int point = 0; point < path->points_per_line; point++) {
-            int tool_x = point * x_step;
-
-            // Calculate tool center Z at this position
-            float z = calculate_tool_height_at_position(terrain, tool, tool_x, tool_y, oob_z);
-            path->path_data[path_idx++] = z;
-        }
-    }
-
-    return path;
-}
+// Old dense algorithm removed - using sparse tool representation only
 
 // ============================================================================
 // Memory Management
@@ -469,23 +637,13 @@ HeightMap* create_tool_map(float* points, int point_count, float grid_step) {
 
 ToolPath* generate_path(HeightMap* terrain, HeightMap* tool,
                         int x_step, int y_step, float oob_z) {
-    // TEST: Try dense algorithm to see if it's faster in WASM
-    // (sparse has 5x slowdown in browser vs native, investigating why)
-
-    // Debug marker: write -1 to indicate using DENSE
-    *((int*)0x10000) = -1;
-
-    return generate_toolpath_dense(terrain, tool, x_step, y_step, oob_z);
-
-    /* ORIGINAL SPARSE CODE - temporarily disabled for testing
     // Convert tool to sparse representation for better performance
     SparseTool* sparse_tool = create_sparse_tool_from_map(tool);
     if (!sparse_tool) {
         return NULL;
     }
 
-    // Debug: Write sparse tool count to memory location 0 for browser verification
-    // Browser can read this to confirm sparse algorithm is being used
+    // Debug: Write sparse tool count to memory location for browser verification
     *((int*)0x10000) = sparse_tool->count;
 
     // Generate toolpath using sparse algorithm
@@ -495,7 +653,25 @@ ToolPath* generate_path(HeightMap* terrain, HeightMap* tool,
     free_sparse_tool(sparse_tool);
 
     return path;
-    */
+}
+
+ToolPath* generate_path_partial(HeightMap* terrain, HeightMap* tool,
+                                int x_step, int y_step, float oob_z,
+                                int start_scanline, int end_scanline) {
+    // Convert tool to sparse representation for better performance
+    SparseTool* sparse_tool = create_sparse_tool_from_map(tool);
+    if (!sparse_tool) {
+        return NULL;
+    }
+
+    // Generate partial toolpath using sparse algorithm
+    ToolPath* path = generate_toolpath_partial(terrain, sparse_tool, x_step, y_step, oob_z,
+                                                start_scanline, end_scanline);
+
+    // Free sparse tool (no longer needed)
+    free_sparse_tool(sparse_tool);
+
+    return path;
 }
 
 void get_path_dimensions(ToolPath* path, int* num_scanlines, int* points_per_line) {

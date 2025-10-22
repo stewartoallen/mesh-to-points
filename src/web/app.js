@@ -217,6 +217,9 @@ function onWindowResize() {
     renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
+// Configuration
+const NUM_PARALLEL_WORKERS = 4; // Number of parallel workers for toolpath generation
+
 // Web Worker setup
 function initWorkers() {
     // Terrain worker
@@ -303,45 +306,10 @@ function initWorkers() {
         updateStatus('Tool worker error');
     };
 
-    // Toolpath worker
-    toolpathWorker = new Worker('worker.js');
-    toolpathWorker.onmessage = function(e) {
-        const { type, data, message } = e.data;
-
-        switch (type) {
-            case 'wasm-ready':
-                console.log('Toolpath worker WASM ready');
-                updateStatus('Ready');
-                break;
-
-            case 'status':
-                updateStatus(message);
-                break;
-
-            case 'toolpath-complete':
-                displayToolpath(data);
-                updateStatus('Toolpath complete');
-                generateToolpathBtn.disabled = false;
-
-                // Store timing
-                if (e.data.generationTime !== undefined) {
-                    timingData.toolpathGeneration = e.data.generationTime;
-                    updateTimingPanel();
-                }
-                break;
-
-            case 'error':
-                console.error('Toolpath worker error:', message);
-                updateStatus('Error: ' + message);
-                alert('Error: ' + message);
-                break;
-        }
-    };
-
-    toolpathWorker.onerror = function(error) {
-        console.error('Toolpath worker error:', error);
-        updateStatus('Toolpath worker error');
-    };
+    // Toolpath worker - REPLACED WITH PARALLEL COORDINATOR
+    // We'll create workers on-demand when generating toolpath
+    toolpathWorker = null; // No longer using single worker
+    console.log('✓ Workers initialized (parallel mode with', NUM_PARALLEL_WORKERS, 'workers)');
 }
 
 // Update status display
@@ -780,45 +748,194 @@ toolFileInput.addEventListener('change', async (e) => {
     }
 });
 
+// Parallel toolpath generation coordinator
+async function generateToolpathParallel(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep) {
+    const startTime = performance.now();
+
+    // Create temporary worker to get dimensions
+    const tempWorker = new Worker('worker-parallel.js');
+
+    return new Promise((resolve, reject) => {
+        let terrainDims = null;
+        let totalScanlines = null;
+        let pointsPerLine = null;
+
+        tempWorker.onmessage = async function(e) {
+            const { type, data } = e.data;
+
+            if (type === 'wasm-ready') {
+                // Get dimensions by requesting conversion
+                const terrainSize = terrainPoints.length * 4;
+                const toolSize = toolPoints.length * 4;
+
+                // Use a quick helper: convert and get dimensions
+                // For now, we'll calculate dimensions ourselves
+                // pointsPerLine = ceil(terrainWidth / xStep), where terrainWidth comes from bounds
+
+                // Calculate from bounds (approximate)
+                let minX = Infinity, maxX = -Infinity;
+                let minY = Infinity, maxY = -Infinity;
+
+                for (let i = 0; i < terrainPoints.length; i += 3) {
+                    const x = terrainPoints[i];
+                    const y = terrainPoints[i + 1];
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+
+                const terrainWidth = Math.round((maxX - minX) / gridStep) + 1;
+                const terrainHeight = Math.round((maxY - minY) / gridStep) + 1;
+
+                pointsPerLine = Math.ceil(terrainWidth / xStep);
+                totalScanlines = Math.ceil(terrainHeight / yStep);
+
+                console.log(`📐 Terrain dimensions: ${terrainWidth}x${terrainHeight}, Toolpath: ${pointsPerLine}x${totalScanlines}`);
+
+                // Close temp worker
+                tempWorker.terminate();
+
+                // Now spawn parallel workers
+                const scanlinesPerWorker = Math.ceil(totalScanlines / NUM_PARALLEL_WORKERS);
+                const workers = [];
+                const results = [];
+                let completedWorkers = 0;
+
+                console.log(`🚀 Spawning ${NUM_PARALLEL_WORKERS} parallel workers...`);
+
+                for (let i = 0; i < NUM_PARALLEL_WORKERS; i++) {
+                    const startScanline = i * scanlinesPerWorker;
+                    const endScanline = Math.min(startScanline + scanlinesPerWorker, totalScanlines);
+
+                    if (startScanline >= totalScanlines) break;
+
+                    console.log(`  Worker ${i}: scanlines ${startScanline}-${endScanline}`);
+
+                    const worker = new Worker('worker-parallel.js');
+                    const workerIndex = i;
+
+                    worker.onmessage = function(e) {
+                        const { type, data: workerData } = e.data;
+
+                        if (type === 'wasm-ready') {
+                            // Worker ready, send work
+                            worker.postMessage({
+                                type: 'generate-toolpath-partial',
+                                data: {
+                                    terrainPoints,
+                                    toolPoints,
+                                    xStep,
+                                    yStep,
+                                    oobZ,
+                                    gridStep,
+                                    startScanline,
+                                    endScanline
+                                }
+                            });
+                        } else if (type === 'toolpath-partial-complete') {
+                            console.log(`  ✓ Worker ${workerIndex} completed`);
+                            results[workerIndex] = workerData;
+                            completedWorkers++;
+
+                            // Terminate worker
+                            worker.terminate();
+
+                            // Check if all done
+                            if (completedWorkers === workers.length) {
+                                // Merge results
+                                console.log('🔗 Merging results...');
+                                const mergedData = new Float32Array(totalScanlines * pointsPerLine);
+
+                                for (const result of results) {
+                                    const startIdx = result.startScanline * result.pointsPerLine;
+                                    mergedData.set(result.pathData, startIdx);
+                                }
+
+                                const endTime = performance.now();
+                                const totalTime = endTime - startTime;
+
+                                console.log(`✅ Parallel generation complete in ${totalTime.toFixed(1)}ms`);
+
+                                resolve({
+                                    pathData: mergedData,
+                                    numScanlines: totalScanlines,
+                                    pointsPerLine: pointsPerLine,
+                                    generationTime: totalTime
+                                });
+                            }
+                        } else if (type === 'error') {
+                            console.error(`Worker ${workerIndex} error:`, workerData);
+                            worker.terminate();
+                            reject(new Error(workerData.message || 'Worker error'));
+                        }
+                    };
+
+                    worker.onerror = function(error) {
+                        console.error(`Worker ${workerIndex} error:`, error);
+                        worker.terminate();
+                        reject(error);
+                    };
+
+                    workers.push(worker);
+                }
+            } else if (type === 'error') {
+                tempWorker.terminate();
+                reject(new Error(data.message || 'Worker error'));
+            }
+        };
+
+        tempWorker.onerror = function(error) {
+            tempWorker.terminate();
+            reject(error);
+        };
+    });
+}
+
 generateToolpathBtn.addEventListener('click', async () => {
     if (!terrainData || !toolData) {
         alert('Please load both terrain and tool STL files first');
         return;
     }
 
-    console.log('Generating toolpath...');
-    updateStatus('Generating toolpath...');
+    console.log('🎯 Starting parallel toolpath generation...');
+    updateStatus('Generating toolpath (parallel)...');
 
     // Disable button during processing
     generateToolpathBtn.disabled = true;
 
     try {
-
-        // Now generate toolpath
         const xStep = parseInt(xStepInput.value);
         const yStep = parseInt(yStepInput.value);
         const zFloor = parseFloat(zFloorInput.value);
 
-        console.log('Generating toolpath with X step:', xStep, 'Y step:', yStep, 'Z floor:', zFloor, 'Grid step:', STEP_SIZE);
-        updateStatus('Generating toolpath...');
+        console.log('Parameters: X step:', xStep, 'Y step:', yStep, 'Z floor:', zFloor, 'Grid step:', STEP_SIZE);
 
-        toolpathWorker.postMessage({
-            type: 'generate-toolpath',
-            data: {
-                terrainPoints: terrainData.positions,
-                toolPoints: toolData.positions,
-                xStep: xStep,
-                yStep: yStep,
-                oobZ: zFloor,
-                gridStep: STEP_SIZE
-            }
-        });
+        // Generate toolpath using parallel workers
+        const result = await generateToolpathParallel(
+            terrainData.positions,
+            toolData.positions,
+            xStep,
+            yStep,
+            zFloor,
+            STEP_SIZE
+        );
+
+        // Display result
+        displayToolpath(result);
+        updateStatus('Toolpath complete');
+        generateToolpathBtn.disabled = false;
+
+        // Store timing
+        timingData.toolpathGeneration = result.generationTime;
+        updateTimingPanel();
 
         // Enable clear button
         clearToolpathBtn.disabled = false;
 
     } catch (error) {
         console.error('Error generating toolpath:', error);
+        updateStatus('Error: ' + error.message);
         alert('Error generating toolpath: ' + error.message);
         generateToolpathBtn.disabled = false;
     }
