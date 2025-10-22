@@ -383,12 +383,14 @@ function processFile(file) {
         console.log('File loaded, buffer size:', buffer.byteLength);
 
         // Send to worker for processing
+        // Terrain uses upward-facing filter (0)
         console.log('Sending to worker...');
         worker.postMessage({
             type: 'process-stl',
             data: {
                 buffer: buffer,
-                stepSize: STEP_SIZE
+                stepSize: STEP_SIZE,
+                filterMode: 0 // FILTER_UPWARD_FACING for terrain
             }
         }, [buffer]); // Transfer buffer ownership
         console.log('Message sent to worker');
@@ -500,7 +502,8 @@ generateToolpathBtn.addEventListener('click', async () => {
                 type: 'process-stl',
                 data: {
                     buffer: buffer,
-                    stepSize: STEP_SIZE
+                    stepSize: STEP_SIZE,
+                    filterMode: 1 // FILTER_DOWNWARD_FACING for tool
                 }
             }, [buffer]);
         });

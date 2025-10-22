@@ -127,8 +127,8 @@ function parseASCIISTL(text) {
 }
 
 // Convert mesh using WASM
-function convertMesh(positions, triangleCount, stepSize) {
-    console.log('convertMesh: start');
+function convertMesh(positions, triangleCount, stepSize, filterMode) {
+    console.log('convertMesh: start, filterMode:', filterMode);
     if (!meshWasm) {
         throw new Error('WASM module not initialized');
     }
@@ -157,7 +157,8 @@ function convertMesh(positions, triangleCount, stepSize) {
         inputPtr,
         triangleCount,
         stepSize,
-        countPtr
+        countPtr,
+        filterMode
     );
     const elapsed = performance.now() - startTime;
     console.log('convertMesh: WASM returned after', elapsed, 'ms, output pointer:', outputPtr);
@@ -284,7 +285,7 @@ self.onmessage = async function(e) {
 
             case 'process-stl':
                 console.log('Worker: process-stl', data);
-                const { buffer, stepSize } = data;
+                const { buffer, stepSize, filterMode } = data;
 
                 console.log('Worker: parsing STL, buffer size:', buffer?.byteLength);
                 self.postMessage({ type: 'status', message: 'Parsing STL...' });
@@ -314,7 +315,9 @@ self.onmessage = async function(e) {
 
                 console.log('Worker: calling convertMesh');
                 const conversionStart = performance.now();
-                const result = convertMesh(parsed.positions, parsed.triangleCount, stepSize);
+                // Default to upward-facing if not specified (for backward compatibility)
+                const filter = filterMode !== undefined ? filterMode : 0;
+                const result = convertMesh(parsed.positions, parsed.triangleCount, stepSize, filter);
                 const conversionTime = performance.now() - conversionStart;
                 console.log('Worker: TOTAL conversion took', conversionTime.toFixed(2), 'ms');
                 console.log('Worker: conversion complete, point count:', result.pointCount);

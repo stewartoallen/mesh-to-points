@@ -136,7 +136,7 @@ void add_triangle_to_cell(GridCell* cell, int triangle_index) {
 }
 
 // Create XY grid and populate with triangles
-XYGrid* create_xy_grid(Triangle* tris, int triangle_count, BoundingBox* bounds) {
+XYGrid* create_xy_grid(Triangle* tris, int triangle_count, BoundingBox* bounds, int filter_mode) {
     XYGrid* grid = (XYGrid*)malloc(sizeof(XYGrid));
 
     // Determine grid resolution (aim for ~20-50 cells per dimension)
@@ -163,8 +163,10 @@ XYGrid* create_xy_grid(Triangle* tris, int triangle_count, BoundingBox* bounds) 
 
     // Insert each triangle into overlapping cells
     for (int t = 0; t < triangle_count; t++) {
-        // Skip back-facing triangles
-        if (tris[t].normal_z <= 0) continue;
+        // Apply face filtering based on mode
+        if (filter_mode == FILTER_UPWARD_FACING && tris[t].normal_z <= 0) continue;  // Skip downward-facing
+        if (filter_mode == FILTER_DOWNWARD_FACING && tris[t].normal_z >= 0) continue; // Skip upward-facing
+        // FILTER_NONE: no skipping
 
         // Find which cells this triangle's XY bbox overlaps
         int min_cell_x = (int)((tris[t].bbox_min_x - grid->grid_min_x) / grid->cell_size_x);
@@ -218,7 +220,7 @@ void add_point(Vec3 point) {
 }
 
 // Main conversion function
-float* convert_to_point_mesh(float* triangles, int triangle_count, float step_size, int* out_point_count) {
+float* convert_to_point_mesh(float* triangles, int triangle_count, float step_size, int* out_point_count, int filter_mode) {
     // Reset output
     if (output_points != NULL) {
         free(output_points);
@@ -275,7 +277,7 @@ float* convert_to_point_mesh(float* triangles, int triangle_count, float step_si
     }
 
     // Create XY grid for spatial acceleration
-    XYGrid* grid = create_xy_grid(tris, triangle_count, &bounds);
+    XYGrid* grid = create_xy_grid(tris, triangle_count, &bounds, filter_mode);
 
     // Ray direction (pointing down -Z to +Z)
     Vec3 ray_dir = {0.0f, 0.0f, 1.0f};

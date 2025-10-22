@@ -23,8 +23,13 @@ typedef struct {
     float min_z;
 } Triangle;
 
+// Face filtering modes
+#define FILTER_UPWARD_FACING 0   // Keep upward-facing triangles (normal_z > 0) - for terrain
+#define FILTER_DOWNWARD_FACING 1 // Keep downward-facing triangles (normal_z < 0) - for tools
+#define FILTER_NONE 2            // Keep all triangles
+
 // Public API
-float* convert_to_point_mesh(float* triangles, int triangle_count, float step_size, int* out_point_count);
+float* convert_to_point_mesh(float* triangles, int triangle_count, float step_size, int* out_point_count, int filter_mode);
 void get_bounds(float* out_bounds);
 void free_output();
 float test_triangle_data(float* triangles, int count);

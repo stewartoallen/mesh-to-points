@@ -14,7 +14,7 @@
 
 // Export all the library functions for WASM
 EXPORT
-float* convert_to_point_mesh(float* triangles, int triangle_count, float step_size, int* out_point_count);
+float* convert_to_point_mesh(float* triangles, int triangle_count, float step_size, int* out_point_count, int filter_mode);
 
 EXPORT
 void get_bounds(float* out_bounds);
