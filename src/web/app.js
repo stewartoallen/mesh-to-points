@@ -78,19 +78,19 @@ function initScene() {
     scene.add(axesHelper);
 
     // Add axis labels
-    const canvas2d = document.createElement('canvas');
-    const context = canvas2d.getContext('2d');
-    canvas2d.width = 64;
-    canvas2d.height = 64;
-
     function createTextSprite(text, color) {
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        canvas.width = 64;
+        canvas.height = 64;
+
         context.clearRect(0, 0, 64, 64);
         context.font = 'Bold 40px Arial';
         context.fillStyle = color;
         context.textAlign = 'center';
         context.fillText(text, 32, 40);
 
-        const texture = new THREE.CanvasTexture(canvas2d);
+        const texture = new THREE.CanvasTexture(canvas);
         const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
         const sprite = new THREE.Sprite(spriteMaterial);
         sprite.scale.set(5, 5, 1);
@@ -101,11 +101,11 @@ function initScene() {
     xLabel.position.set(25, 0, 0);
     scene.add(xLabel);
 
-    const yLabel = createTextSprite('Y', '#00ff00');
+    const yLabel = createTextSprite('Z', '#00ff00');
     yLabel.position.set(0, 25, 0);
     scene.add(yLabel);
 
-    const zLabel = createTextSprite('Z', '#0000ff');
+    const zLabel = createTextSprite('Y', '#0000ff');
     zLabel.position.set(0, 0, 25);
     scene.add(zLabel);
 

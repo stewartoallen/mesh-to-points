@@ -162,15 +162,15 @@ ToolCloud* create_tool_cloud(float* points, int point_count, float grid_step) {
 
     // Find tool center
     // For XY: use average (tool should be centered at origin)
-    // For Z: use the HIGHEST point (mounting point / tool holder position)
+    // For Z: use the LOWEST point (tool tip / cutting point)
     float center_x = 0, center_y = 0;
-    float center_z = -1e10f;  // Start very low, find highest
+    float center_z = 1e10f;  // Start very high, find lowest
 
     for (int i = 0; i < point_count; i++) {
         center_x += points[i * 3 + 0];
         center_y += points[i * 3 + 1];
         float z = points[i * 3 + 2];
-        if (z > center_z) center_z = z;  // Find highest Z (tool mounting point)
+        if (z < center_z) center_z = z;  // Find lowest Z (tool tip)
     }
     center_x /= point_count;
     center_y /= point_count;
