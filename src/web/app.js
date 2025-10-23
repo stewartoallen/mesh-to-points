@@ -1084,53 +1084,6 @@ generateToolpathBtn.addEventListener('click', async () => {
                     zFloor,
                     STEP_SIZE
                 );
-
-                // DEBUG: Compare with WASM to verify correctness
-                console.log('🔍 Running WASM for comparison...');
-                const wasmResult = await generateToolpathSingle(
-                    terrainData.positions,
-                    toolData.positions,
-                    xStep,
-                    yStep,
-                    zFloor,
-                    STEP_SIZE
-                );
-                console.log('🔍 Comparing WebGPU vs WASM outputs...');
-                let maxDiff = 0;
-                let mismatches = 0;
-                let firstMismatch = -1;
-                for (let i = 0; i < Math.min(result.pathData.length, wasmResult.pathData.length); i++) {
-                    const diff = Math.abs(result.pathData[i] - wasmResult.pathData[i]);
-                    if (diff > maxDiff) maxDiff = diff;
-                    if (diff > 0.001) {
-                        if (firstMismatch < 0) firstMismatch = i;
-                        mismatches++;
-                    }
-                }
-                console.log(`🔍 Max diff: ${maxDiff.toFixed(6)}, Mismatches: ${mismatches}/${result.pathData.length}`);
-                if (firstMismatch >= 0) {
-                    const scanline = Math.floor(firstMismatch / result.pointsPerLine);
-                    const point = firstMismatch % result.pointsPerLine;
-                    console.log(`🔍 First mismatch at index ${firstMismatch} (scanline ${scanline}, point ${point}):`);
-                    console.log(`  WebGPU: ${result.pathData[firstMismatch].toFixed(3)}`);
-                    console.log(`  WASM: ${wasmResult.pathData[firstMismatch].toFixed(3)}`);
-                    console.log(`  Diff: ${Math.abs(result.pathData[firstMismatch] - wasmResult.pathData[firstMismatch]).toFixed(3)}`);
-
-                    // Show consecutive samples to see patterns
-                    console.log(`🔍 Consecutive samples around first mismatch:`);
-                    for (let i = Math.max(0, firstMismatch - 2); i < Math.min(result.pathData.length, firstMismatch + 10); i++) {
-                        const diff = Math.abs(result.pathData[i] - wasmResult.pathData[i]);
-                        const marker = (diff > 0.001) ? '❌' : '✓';
-                        const sl = Math.floor(i / result.pointsPerLine);
-                        const pt = i % result.pointsPerLine;
-                        console.log(`  ${marker} [${i}] (scanline=${sl}, pt=${pt}): GPU=${result.pathData[i].toFixed(3)} WASM=${wasmResult.pathData[i].toFixed(3)} diff=${diff.toFixed(3)}`);
-                    }
-                }
-                if (mismatches === 0) {
-                    console.log('✅ WebGPU output matches WASM exactly!');
-                } else {
-                    console.warn(`⚠️ WebGPU differs from WASM in ${mismatches} points`);
-                }
                 break;
 
             case 'workers':
