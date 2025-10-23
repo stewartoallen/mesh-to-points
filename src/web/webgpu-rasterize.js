@@ -3,6 +3,8 @@
 
 let device = null;
 let isInitialized = false;
+let cachedPipeline = null;
+let cachedShaderModule = null;
 
 // Initialize WebGPU device
 export async function initWebGPURasterizer() {
@@ -21,8 +23,18 @@ export async function initWebGPURasterizer() {
         }
 
         device = await adapter.requestDevice();
+
+        // Pre-compile shader module (expensive operation)
+        cachedShaderModule = device.createShaderModule({ code: rasterizeShaderCode });
+
+        // Pre-create pipeline (very expensive operation)
+        cachedPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: cachedShaderModule, entryPoint: 'main' },
+        });
+
         isInitialized = true;
-        console.log('✅ WebGPU rasterizer initialized');
+        console.log('✅ WebGPU rasterizer initialized (pipeline cached)');
         return true;
     } catch (error) {
         console.error('Failed to initialize WebGPU:', error);
@@ -301,15 +313,9 @@ export async function rasterizeMeshWebGPU(triangles, stepSize, filterMode = 0) {
     const t2 = performance.now();
     console.log(`🎮 [WebGPU Rasterize] ⏱️  Buffer setup: ${(t2 - t1).toFixed(1)}ms`);
 
-    // Create shader and pipeline
-    const shaderModule = device.createShaderModule({ code: rasterizeShaderCode });
-    const pipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: shaderModule, entryPoint: 'main' },
-    });
-
+    // Use cached pipeline (already created during init)
     const bindGroup = device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
+        layout: cachedPipeline.getBindGroupLayout(0),
         entries: [
             { binding: 0, resource: { buffer: triangleBuffer } },
             { binding: 1, resource: { buffer: outputBuffer } },
@@ -324,7 +330,7 @@ export async function rasterizeMeshWebGPU(triangles, stepSize, filterMode = 0) {
     // Dispatch compute shader
     const commandEncoder = device.createCommandEncoder();
     const passEncoder = commandEncoder.beginComputePass();
-    passEncoder.setPipeline(pipeline);
+    passEncoder.setPipeline(cachedPipeline);
     passEncoder.setBindGroup(0, bindGroup);
 
     const workgroupsX = Math.ceil(gridWidth / 16);
