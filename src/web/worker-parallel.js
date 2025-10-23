@@ -162,6 +162,111 @@ function convertMesh(positions, triangleCount, stepSize, filterMode) {
     return { positions: result, pointCount, bounds };
 }
 
+// Create WASM height maps and sparse tool (for WebGPU v2)
+function createHeightMaps(terrainPoints, toolPoints, gridStep) {
+    const t0 = performance.now();
+
+    // Allocate and copy terrain points
+    const terrainSize = terrainPoints.length * 4;
+    const terrainPtr = toolpathWasm.exports.malloc(terrainSize);
+    const terrainArray = new Float32Array(toolpathMemory.buffer, terrainPtr, terrainPoints.length);
+    terrainArray.set(terrainPoints);
+
+    // Allocate and copy tool points
+    const toolSize = toolPoints.length * 4;
+    const toolPtr = toolpathWasm.exports.malloc(toolSize);
+    const toolArray = new Float32Array(toolpathMemory.buffer, toolPtr, toolPoints.length);
+    toolArray.set(toolPoints);
+
+    // Create terrain height map
+    const terrainPointCount = terrainPoints.length / 3;
+    const terrainMapPtr = toolpathWasm.exports.create_terrain_map(terrainPtr, terrainPointCount, gridStep);
+
+    // Create tool height map
+    const toolPointCount = toolPoints.length / 3;
+    const toolMapPtr = toolpathWasm.exports.create_tool_map(toolPtr, toolPointCount, gridStep);
+
+    const t1 = performance.now();
+    console.log(`[Worker] ⏱️  Map creation: ${(t1 - t0).toFixed(1)}ms`);
+
+    // Get terrain dimensions by reading HeightMap struct
+    // HeightMap layout: float* z_grid (offset 0), int width (offset 4), int height (offset 8)
+    const terrainStructView = new Int32Array(toolpathMemory.buffer, terrainMapPtr, 5);
+    const terrainGridPtr = terrainStructView[0]; // float* z_grid
+    const terrainWidth = terrainStructView[1];    // int width
+    const terrainHeight = terrainStructView[2];   // int height
+
+    // Get terrain grid data directly from the z_grid pointer
+    const terrainGridSize = terrainWidth * terrainHeight;
+    const terrainGrid = new Float32Array(toolpathMemory.buffer, terrainGridPtr, terrainGridSize);
+    const terrainGridCopy = new Float32Array(terrainGrid);
+
+    // Create sparse tool from tool map (this is done internally during generate_path,
+    // but we need to do it here to get the data)
+    // Note: We'll just read the tool map and convert it to sparse in JavaScript
+    // since there's no WASM export to get the sparse tool data directly
+
+    // Read tool HeightMap struct
+    const toolStructView = new Int32Array(toolpathMemory.buffer, toolMapPtr, 5);
+    const toolGridPtr = toolStructView[0]; // float* z_grid
+    const toolWidth = toolStructView[1];    // int width
+    const toolHeight = toolStructView[2];   // int height
+
+    const toolGridSize = toolWidth * toolHeight;
+    const toolGrid = new Float32Array(toolpathMemory.buffer, toolGridPtr, toolGridSize);
+
+    // Convert tool grid to sparse format (skip NaN cells)
+    const sparseData = {
+        xOffsets: [],
+        yOffsets: [],
+        zValues: []
+    };
+
+    const toolCenterX = Math.floor(toolWidth / 2);
+    const toolCenterY = Math.floor(toolHeight / 2);
+
+    for (let ty = 0; ty < toolHeight; ty++) {
+        for (let tx = 0; tx < toolWidth; tx++) {
+            const z = toolGrid[ty * toolWidth + tx];
+            if (!isNaN(z)) {
+                sparseData.xOffsets.push(tx - toolCenterX);
+                sparseData.yOffsets.push(ty - toolCenterY);
+                sparseData.zValues.push(z);
+            }
+        }
+    }
+
+    const sparseToolCount = sparseData.xOffsets.length;
+    const xOffsetsCopy = new Int32Array(sparseData.xOffsets);
+    const yOffsetsCopy = new Int32Array(sparseData.yOffsets);
+    const zValuesCopy = new Float32Array(sparseData.zValues);
+
+    console.log(`[Worker] 📏 Terrain grid: ${terrainWidth}x${terrainHeight}, Sparse tool: ${sparseToolCount} points`);
+
+    // Free memory
+    toolpathWasm.exports.free_height_map(toolMapPtr);
+    toolpathWasm.exports.free_height_map(terrainMapPtr);
+    toolpathWasm.exports.free(toolPtr);
+    toolpathWasm.exports.free(terrainPtr);
+
+    const t2 = performance.now();
+    console.log(`[Worker] ⏱️  TOTAL map creation: ${(t2 - t0).toFixed(1)}ms`);
+
+    return {
+        terrain: {
+            width: terrainWidth,
+            height: terrainHeight,
+            grid: terrainGridCopy
+        },
+        sparseTool: {
+            count: sparseToolCount,
+            xOffsets: xOffsetsCopy,
+            yOffsets: yOffsetsCopy,
+            zValues: zValuesCopy
+        }
+    };
+}
+
 // Generate partial toolpath for a range of scanlines
 function generateToolpathPartial(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, startScanline, endScanline) {
     const t0 = performance.now();
@@ -335,6 +440,21 @@ self.onmessage = async function(e) {
                     type: 'toolpath-partial-complete',
                     data: pathResult
                 }, [pathResult.pathData.buffer]);
+
+                break;
+
+            case 'create-maps':
+                const createData = data;
+                const mapsResult = createHeightMaps(
+                    createData.terrainPoints,
+                    createData.toolPoints,
+                    createData.gridStep
+                );
+
+                self.postMessage({
+                    type: 'maps-created',
+                    data: mapsResult
+                });
 
                 break;
 

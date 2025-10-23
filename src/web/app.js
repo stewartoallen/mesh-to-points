@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { initWebGPU, generateToolpathWebGPU } from './toolpath-webgpu.js?v=6';
+import { initWebGPU, generateToolpathWebGPU } from './toolpath-webgpu.js?v=7';
+import { generateToolpathWebGPUv2 } from './toolpath-webgpu-v2.js?v=1';
 
 // Configuration
 let STEP_SIZE = 0.1; // mm (default, can be changed via dropdown)
@@ -326,6 +327,33 @@ async function initWorkers() {
     // We'll create workers on-demand when generating toolpath
     toolpathWorker = null; // No longer using single worker
     console.log('✓ Workers initialized (parallel mode with', NUM_PARALLEL_WORKERS, 'workers)');
+
+    // Auto-load last files from localStorage
+    setTimeout(() => {
+        const terrainFile = loadFileFromLocalStorage('lastTerrainFile');
+        const toolFile = loadFileFromLocalStorage('lastToolFile');
+
+        if (terrainFile) {
+            console.log('💾 Auto-loading terrain:', terrainFile.name);
+            handleFile(terrainFile);
+        }
+
+        if (toolFile) {
+            console.log('💾 Auto-loading tool:', toolFile.name);
+            // Wait a bit for terrain to load first
+            setTimeout(() => {
+                toolFileInput.files = createFileList(toolFile);
+                toolFileInput.dispatchEvent(new Event('change'));
+            }, 500);
+        }
+    }, 100);
+}
+
+// Helper to create FileList from File
+function createFileList(file) {
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(file);
+    return dataTransfer.files;
 }
 
 // Update status display
@@ -648,10 +676,67 @@ function handleFile(file) {
     lastLoadedFile = file;
     recomputeBtn.disabled = false;
 
+    // Save to localStorage for auto-reload
+    saveFileToLocalStorage('lastTerrainFile', file);
+
     // Hide drop zone - move to corner
     dropZone.classList.add('minimized');
 
     processFile(file);
+}
+
+// Save file to localStorage
+async function saveFileToLocalStorage(key, file) {
+    try {
+        const buffer = await file.arrayBuffer();
+        const base64 = arrayBufferToBase64(buffer);
+        localStorage.setItem(key, JSON.stringify({
+            name: file.name,
+            data: base64
+        }));
+        console.log(`💾 Saved ${file.name} to localStorage`);
+    } catch (error) {
+        console.error('Error saving file to localStorage:', error);
+    }
+}
+
+// Load file from localStorage
+function loadFileFromLocalStorage(key) {
+    try {
+        const stored = localStorage.getItem(key);
+        if (!stored) return null;
+
+        const { name, data } = JSON.parse(stored);
+        const buffer = base64ToArrayBuffer(data);
+        const file = new File([buffer], name, { type: 'application/octet-stream' });
+        console.log(`💾 Loaded ${name} from localStorage`);
+        return file;
+    } catch (error) {
+        console.error('Error loading file from localStorage:', error);
+        return null;
+    }
+}
+
+// Helper: ArrayBuffer to Base64
+function arrayBufferToBase64(buffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+}
+
+// Helper: Base64 to ArrayBuffer
+function base64ToArrayBuffer(base64) {
+    const binary = atob(base64);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes.buffer;
 }
 
 function processFile(file) {
@@ -733,6 +818,9 @@ toolFileInput.addEventListener('change', async (e) => {
     if (file) {
         toolFile = file;
         toolFilenameEl.textContent = file.name;
+
+        // Save to localStorage for auto-reload
+        saveFileToLocalStorage('lastToolFile', file);
 
         // Convert tool immediately
         if (terrainData) {
@@ -988,7 +1076,7 @@ generateToolpathBtn.addEventListener('click', async () => {
         // Select backend
         switch (backend) {
             case 'webgpu':
-                result = await generateToolpathWebGPU(
+                result = await generateToolpathWebGPUv2(
                     terrainData.positions,
                     toolData.positions,
                     xStep,
@@ -1028,17 +1116,14 @@ generateToolpathBtn.addEventListener('click', async () => {
                     console.log(`  WASM: ${wasmResult.pathData[firstMismatch].toFixed(3)}`);
                     console.log(`  Diff: ${Math.abs(result.pathData[firstMismatch] - wasmResult.pathData[firstMismatch]).toFixed(3)}`);
 
-                    // Show a few more examples
-                    console.log(`🔍 Sample mismatches:`);
-                    let samples = 0;
-                    for (let i = 0; i < result.pathData.length && samples < 5; i++) {
+                    // Show consecutive samples to see patterns
+                    console.log(`🔍 Consecutive samples around first mismatch:`);
+                    for (let i = Math.max(0, firstMismatch - 2); i < Math.min(result.pathData.length, firstMismatch + 10); i++) {
                         const diff = Math.abs(result.pathData[i] - wasmResult.pathData[i]);
-                        if (diff > 0.001) {
-                            const sl = Math.floor(i / result.pointsPerLine);
-                            const pt = i % result.pointsPerLine;
-                            console.log(`  [${i}] (${sl},${pt}): GPU=${result.pathData[i].toFixed(3)} WASM=${wasmResult.pathData[i].toFixed(3)} diff=${diff.toFixed(3)}`);
-                            samples++;
-                        }
+                        const marker = (diff > 0.001) ? '❌' : '✓';
+                        const sl = Math.floor(i / result.pointsPerLine);
+                        const pt = i % result.pointsPerLine;
+                        console.log(`  ${marker} [${i}] (scanline=${sl}, pt=${pt}): GPU=${result.pathData[i].toFixed(3)} WASM=${wasmResult.pathData[i].toFixed(3)} diff=${diff.toFixed(3)}`);
                     }
                 }
                 if (mismatches === 0) {
