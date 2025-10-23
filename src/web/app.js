@@ -16,6 +16,18 @@ const statusEl = document.getElementById('status');
 const pointCountEl = document.getElementById('point-count');
 const boundsEl = document.getElementById('bounds');
 
+// Bounds override UI elements
+const useBoundsOverride = document.getElementById('use-bounds-override');
+const boundsInputsDiv = document.getElementById('bounds-inputs');
+const boundsMinX = document.getElementById('bounds-min-x');
+const boundsMinY = document.getElementById('bounds-min-y');
+const boundsMinZ = document.getElementById('bounds-min-z');
+const boundsMaxX = document.getElementById('bounds-max-x');
+const boundsMaxY = document.getElementById('bounds-max-y');
+const boundsMaxZ = document.getElementById('bounds-max-z');
+const boundsFromSTLBtn = document.getElementById('bounds-from-stl-btn');
+const boundsAddPaddingBtn = document.getElementById('bounds-add-padding-btn');
+
 // Toolpath UI elements
 const toolFileInput = document.getElementById('tool-file-input');
 const toolFilenameEl = document.getElementById('tool-filename');
@@ -49,12 +61,40 @@ let toolData = null;
 let toolFile = null;
 let webgpuWorker = null;
 
+// Store STL bounds for bounds override feature
+let stlBounds = null;
+
 // Timing data
 let timingData = {
     terrainConversion: null,
     toolConversion: null,
     toolpathGeneration: null
 };
+
+// Helper: Get bounds override from UI inputs
+function getBoundsOverride() {
+    if (!useBoundsOverride.checked) {
+        return null;
+    }
+
+    const minX = parseFloat(boundsMinX.value);
+    const minY = parseFloat(boundsMinY.value);
+    const minZ = parseFloat(boundsMinZ.value);
+    const maxX = parseFloat(boundsMaxX.value);
+    const maxY = parseFloat(boundsMaxY.value);
+    const maxZ = parseFloat(boundsMaxZ.value);
+
+    if (isNaN(minX) || isNaN(minY) || isNaN(minZ) ||
+        isNaN(maxX) || isNaN(maxY) || isNaN(maxZ)) {
+        alert('Please fill in all bounds values');
+        return null;
+    }
+
+    return {
+        min: { x: minX, y: minY, z: minZ },
+        max: { x: maxX, y: maxY, z: maxZ }
+    };
+}
 
 function initScene() {
     // Scene
@@ -135,6 +175,83 @@ function initScene() {
         console.log('Step size changed to:', STEP_SIZE, 'mm');
     });
 
+    // Bounds override checkbox handler
+    useBoundsOverride.addEventListener('change', (e) => {
+        boundsInputsDiv.style.display = e.target.checked ? 'block' : 'none';
+
+        // If enabling and bounds are empty, auto-populate from terrain
+        if (e.target.checked && !boundsMinX.value && terrainData && terrainData.bounds) {
+            populateBoundsFromTerrain();
+        }
+    });
+
+    // Helper to populate bounds from terrain data
+    function populateBoundsFromTerrain() {
+        if (terrainData && terrainData.bounds) {
+            const bounds = terrainData.bounds;
+            boundsMinX.value = bounds.min.x.toFixed(2);
+            boundsMinY.value = bounds.min.y.toFixed(2);
+            boundsMinZ.value = bounds.min.z.toFixed(2);
+            boundsMaxX.value = bounds.max.x.toFixed(2);
+            boundsMaxY.value = bounds.max.y.toFixed(2);
+            boundsMaxZ.value = bounds.max.z.toFixed(2);
+            console.log('Auto-populated bounds from terrain');
+        }
+    }
+
+    // "From STL" button - populate bounds from last STL calculation
+    boundsFromSTLBtn.addEventListener('click', () => {
+        if (stlBounds) {
+            boundsMinX.value = stlBounds.min.x.toFixed(2);
+            boundsMinY.value = stlBounds.min.y.toFixed(2);
+            boundsMinZ.value = stlBounds.min.z.toFixed(2);
+            boundsMaxX.value = stlBounds.max.x.toFixed(2);
+            boundsMaxY.value = stlBounds.max.y.toFixed(2);
+            boundsMaxZ.value = stlBounds.max.z.toFixed(2);
+        } else {
+            alert('Please load an STL file first');
+        }
+    });
+
+    // "Add Padding" button - add 10% padding to current bounds
+    boundsAddPaddingBtn.addEventListener('click', () => {
+        // Check if inputs are empty or invalid
+        if (!boundsMinX.value || !boundsMinY.value || !boundsMinZ.value ||
+            !boundsMaxX.value || !boundsMaxY.value || !boundsMaxZ.value) {
+            alert('Please fill in all bounds values first (click "From STL" to populate)');
+            return;
+        }
+
+        const minX = parseFloat(boundsMinX.value);
+        const minY = parseFloat(boundsMinY.value);
+        const minZ = parseFloat(boundsMinZ.value);
+        const maxX = parseFloat(boundsMaxX.value);
+        const maxY = parseFloat(boundsMaxY.value);
+        const maxZ = parseFloat(boundsMaxZ.value);
+
+        if (isNaN(minX) || isNaN(minY) || isNaN(minZ) ||
+            isNaN(maxX) || isNaN(maxY) || isNaN(maxZ)) {
+            alert('Invalid bounds values - please check your inputs');
+            return;
+        }
+
+        if (minX >= maxX || minY >= maxY || minZ >= maxZ) {
+            alert('Invalid bounds: min values must be less than max values');
+            return;
+        }
+
+        const paddingX = (maxX - minX) * 0.1;
+        const paddingY = (maxY - minY) * 0.1;
+        const paddingZ = (maxZ - minZ) * 0.1;
+
+        boundsMinX.value = (minX - paddingX).toFixed(2);
+        boundsMinY.value = (minY - paddingY).toFixed(2);
+        boundsMinZ.value = (minZ - paddingZ).toFixed(2);
+        boundsMaxX.value = (maxX + paddingX).toFixed(2);
+        boundsMaxY.value = (maxY + paddingY).toFixed(2);
+        boundsMaxZ.value = (maxZ + paddingZ).toFixed(2);
+    });
+
     // Recompute button handler
     recomputeBtn.addEventListener('click', async () => {
         if (lastLoadedFile) {
@@ -185,14 +302,15 @@ function initScene() {
                             const { positions, triangleCount } = parseSTL(buffer);
                             console.log('Parsed tool STL:', triangleCount, 'triangles');
 
-                            // Send to WebGPU worker
+                            // Send to WebGPU worker (tools don't use bounds override)
                             webgpuWorker.postMessage({
                                 type: 'rasterize',
                                 data: {
                                     triangles: positions,
                                     stepSize: STEP_SIZE,
                                     filterMode: 1, // 1 = DOWNWARD_FACING
-                                    isForTool: true
+                                    isForTool: true,
+                                    boundsOverride: null
                                 }
                             }, [positions.buffer]);
                         } catch (error) {
@@ -370,6 +488,11 @@ function handleRasterizeComplete(data, isForTool) {
         if (data.conversionTime !== undefined) {
             timingData.terrainConversion = data.conversionTime;
             updateTimingPanel();
+        }
+
+        // Auto-populate bounds if custom bounds is enabled and inputs are empty
+        if (useBoundsOverride.checked && !boundsMinX.value) {
+            populateBoundsFromTerrain();
         }
     }
 }
@@ -779,10 +902,16 @@ async function processFileWebGPU(file) {
         console.log('File loaded, buffer size:', buffer.byteLength);
 
         updateStatus('Parsing STL...');
-        const { positions, triangleCount } = parseSTL(buffer);
+        const { positions, triangleCount, bounds } = parseSTL(buffer);
         console.log('Parsed STL:', triangleCount, 'triangles');
 
+        // Store STL bounds for bounds override feature
+        stlBounds = bounds;
+
         updateStatus('Rasterizing with WebGPU...');
+
+        // Get bounds override if enabled
+        const boundsOverride = getBoundsOverride();
 
         // Send to WebGPU worker
         webgpuWorker.postMessage({
@@ -791,7 +920,8 @@ async function processFileWebGPU(file) {
                 triangles: positions,
                 stepSize: STEP_SIZE,
                 filterMode: 0, // 0 = UPWARD_FACING for terrain
-                isForTool: false
+                isForTool: false,
+                boundsOverride
             }
         }, [positions.buffer]);
     } catch (error) {
@@ -869,14 +999,15 @@ toolFileInput.addEventListener('change', async (e) => {
                 const { positions, triangleCount } = parseSTL(buffer);
                 console.log('Parsed tool STL:', triangleCount, 'triangles');
 
-                // Send to WebGPU worker
+                // Send to WebGPU worker (tools don't use bounds override)
                 webgpuWorker.postMessage({
                     type: 'rasterize',
                     data: {
                         triangles: positions,
                         stepSize: STEP_SIZE,
                         filterMode: 1, // 1 = DOWNWARD_FACING for tool
-                        isForTool: true
+                        isForTool: true,
+                        boundsOverride: null
                     }
                 }, [positions.buffer]);
             } catch (error) {
@@ -1116,7 +1247,8 @@ generateToolpathBtn.addEventListener('click', async () => {
                 xStep,
                 yStep,
                 oobZ: zFloor,
-                gridStep: STEP_SIZE
+                gridStep: STEP_SIZE,
+                terrainBounds: terrainData.bounds // Pass terrain bounds for correct coordinate system
             }
         });
         // Result will be handled by the worker message handler

@@ -1,6 +1,30 @@
 // parse-stl.js
 // Pure JavaScript STL parser (binary and ASCII)
 
+// Calculate bounds from positions array
+function calculateBounds(positions) {
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+    for (let i = 0; i < positions.length; i += 3) {
+        const x = positions[i];
+        const y = positions[i + 1];
+        const z = positions[i + 2];
+
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+        minZ = Math.min(minZ, z);
+        maxZ = Math.max(maxZ, z);
+    }
+
+    return {
+        min: { x: minX, y: minY, z: minZ },
+        max: { x: maxX, y: maxY, z: maxZ }
+    };
+}
+
 // Parse binary STL file
 export function parseBinarySTL(buffer) {
     const dataView = new DataView(buffer);
@@ -25,7 +49,8 @@ export function parseBinarySTL(buffer) {
         offset += 2;
     }
 
-    return { positions, triangleCount: numTriangles };
+    const bounds = calculateBounds(positions);
+    return { positions, triangleCount: numTriangles, bounds };
 }
 
 // Parse ASCII STL file
@@ -58,9 +83,13 @@ export function parseASCIISTL(text) {
         }
     }
 
+    const positionsArray = new Float32Array(positions);
+    const bounds = calculateBounds(positionsArray);
+
     return {
-        positions: new Float32Array(positions),
-        triangleCount: positions.length / 9
+        positions: positionsArray,
+        triangleCount: positions.length / 9,
+        bounds
     };
 }
 

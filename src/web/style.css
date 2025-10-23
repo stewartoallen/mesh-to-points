@@ -474,3 +474,97 @@ body {
 .drop-zone.loading {
     animation: pulse 2s ease-in-out infinite;
 }
+
+/* Bounds Controls */
+.bounds-control {
+    margin-top: 12px;
+}
+
+.bounds-control label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: #00ffff;
+    cursor: pointer;
+}
+
+.bounds-control input[type="checkbox"] {
+    cursor: pointer;
+    width: 16px;
+    height: 16px;
+    accent-color: #00ffff;
+}
+
+.bounds-inputs {
+    margin-top: 12px;
+    padding: 12px;
+    background: rgba(0, 255, 255, 0.05);
+    border: 1px solid rgba(0, 255, 255, 0.2);
+    border-radius: 6px;
+}
+
+.bounds-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+.bounds-row:last-of-type {
+    margin-bottom: 12px;
+}
+
+.bounds-row label {
+    font-size: 12px;
+    color: #00ffff;
+    min-width: 35px;
+    font-weight: 600;
+}
+
+.bounds-row input[type="number"] {
+    flex: 1;
+    padding: 4px 8px;
+    font-size: 12px;
+    background: rgba(0, 0, 0, 0.6);
+    border: 1px solid rgba(0, 255, 255, 0.3);
+    border-radius: 4px;
+    color: #ffffff;
+    outline: none;
+    transition: all 0.2s ease;
+}
+
+.bounds-row input[type="number"]:focus {
+    border-color: #00ffff;
+    box-shadow: 0 0 4px rgba(0, 255, 255, 0.3);
+}
+
+.bounds-row input[type="number"]::placeholder {
+    color: #666666;
+    font-size: 11px;
+}
+
+.bounds-btn {
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    background: rgba(0, 255, 255, 0.1);
+    border: 1px solid rgba(0, 255, 255, 0.3);
+    border-radius: 4px;
+    color: #00ffff;
+    cursor: pointer;
+    outline: none;
+    transition: all 0.2s ease;
+    margin-right: 6px;
+}
+
+.bounds-btn:hover {
+    background: rgba(0, 255, 255, 0.2);
+    border-color: #00ffff;
+    box-shadow: 0 0 6px rgba(0, 255, 255, 0.2);
+}
+
+.bounds-btn:active {
+    background: rgba(0, 255, 255, 0.3);
+    transform: translateY(1px);
+}

@@ -58,9 +58,10 @@ export class STLToMesh {
      * @param {ArrayBuffer} stlBuffer - Binary STL data
      * @param {number} stepSize - Grid resolution (e.g., 0.05)
      * @param {number} filterMode - 0 for max Z, 1 for min Z
+     * @param {object} boundsOverride - Optional bounding box {min: {x, y, z}, max: {x, y, z}}
      * @returns {Promise<{positions: Float32Array, pointCount: number, bounds: object}>}
      */
-    async rasterizeSTL(stlBuffer, stepSize, filterMode = 0) {
+    async rasterizeSTL(stlBuffer, stepSize, filterMode = 0, boundsOverride = null) {
         if (!this.isInitialized) {
             throw new Error('STLToMesh not initialized. Call init() first.');
         }
@@ -75,7 +76,7 @@ export class STLToMesh {
 
             this._sendMessage(
                 'rasterize',
-                { triangles, stepSize, filterMode, isForTool: false },
+                { triangles, stepSize, filterMode, isForTool: false, boundsOverride },
                 'rasterize-complete',
                 handler
             );

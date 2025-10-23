@@ -25,7 +25,25 @@ async function initWebGPU() {
             return false;
         }
 
-        device = await adapter.requestDevice();
+        // Request device with higher limits for large meshes
+        const adapterLimits = adapter.limits;
+        console.log('[WebGPU Worker] Adapter limits:', {
+            maxStorageBufferBindingSize: adapterLimits.maxStorageBufferBindingSize,
+            maxBufferSize: adapterLimits.maxBufferSize
+        });
+
+        device = await adapter.requestDevice({
+            requiredLimits: {
+                maxStorageBufferBindingSize: Math.min(
+                    adapterLimits.maxStorageBufferBindingSize,
+                    1024 * 1024 * 1024 // Request up to 1GB
+                ),
+                maxBufferSize: Math.min(
+                    adapterLimits.maxBufferSize,
+                    1024 * 1024 * 1024 // Request up to 1GB
+                )
+            }
+        });
 
         // Pre-compile rasterize shader module (expensive operation)
         cachedRasterizeShaderModule = device.createShaderModule({ code: rasterizeShaderCode });
@@ -343,8 +361,8 @@ function calculateBounds(triangles) {
 
 // Build spatial grid for efficient triangle culling
 function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
-    const gridWidth = Math.ceil((bounds.max.x - bounds.min.x) / cellSize);
-    const gridHeight = Math.ceil((bounds.max.y - bounds.min.y) / cellSize);
+    const gridWidth = Math.max(1, Math.ceil((bounds.max.x - bounds.min.x) / cellSize));
+    const gridHeight = Math.max(1, Math.ceil((bounds.max.y - bounds.min.y) / cellSize));
     const totalCells = gridWidth * gridHeight;
 
     console.log(`[WebGPU Worker] Building spatial grid ${gridWidth}x${gridHeight} (${cellSize}mm cells)`);
@@ -416,7 +434,7 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
 }
 
 // Rasterize mesh to point cloud
-async function rasterizeMesh(triangles, stepSize, filterMode) {
+async function rasterizeMesh(triangles, stepSize, filterMode, boundsOverride = null) {
     const startTime = performance.now();
 
     if (!isInitialized) {
@@ -431,7 +449,18 @@ async function rasterizeMesh(triangles, stepSize, filterMode) {
 
     console.log(`[WebGPU Worker] Rasterizing ${triangles.length / 9} triangles (step ${stepSize}mm, mode ${filterMode})...`);
 
-    const bounds = calculateBounds(triangles);
+    // Use bounds override if provided, otherwise calculate from triangles
+    const bounds = boundsOverride || calculateBounds(triangles);
+
+    if (boundsOverride) {
+        console.log(`[WebGPU Worker] Using bounds override: min(${bounds.min.x.toFixed(2)}, ${bounds.min.y.toFixed(2)}, ${bounds.min.z.toFixed(2)}) max(${bounds.max.x.toFixed(2)}, ${bounds.max.y.toFixed(2)}, ${bounds.max.z.toFixed(2)})`);
+
+        // Validate bounds
+        if (bounds.min.x >= bounds.max.x || bounds.min.y >= bounds.max.y || bounds.min.z >= bounds.max.z) {
+            throw new Error(`Invalid bounds: min must be less than max. Got min(${bounds.min.x}, ${bounds.min.y}, ${bounds.min.z}) max(${bounds.max.x}, ${bounds.max.y}, ${bounds.max.z})`);
+        }
+    }
+
     const gridWidth = Math.ceil((bounds.max.x - bounds.min.x) / stepSize) + 1;
     const gridHeight = Math.ceil((bounds.max.y - bounds.min.y) / stepSize) + 1;
     const totalGridPoints = gridWidth * gridHeight;
@@ -617,22 +646,35 @@ async function rasterizeMesh(triangles, stepSize, filterMode) {
 }
 
 // Helper: Create height map from point cloud
-function createHeightMapFromPoints(points, gridStep) {
-    if (!points || points.length === 0) {
-        throw new Error('No points provided');
-    }
+function createHeightMapFromPoints(points, gridStep, bounds = null) {
+    // If bounds provided, use them; otherwise calculate from points
+    let minX, minY, minZ, maxX, maxY, maxZ;
 
-    // Find bounds
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    if (bounds) {
+        // Use provided bounds (e.g., from rasterization with bounds override)
+        minX = bounds.min.x;
+        minY = bounds.min.y;
+        minZ = bounds.min.z;
+        maxX = bounds.max.x;
+        maxY = bounds.max.y;
+        maxZ = bounds.max.z;
+    } else {
+        // Calculate bounds from points
+        if (!points || points.length === 0) {
+            throw new Error('No points provided and no bounds specified');
+        }
 
-    for (let i = 0; i < points.length; i += 3) {
-        minX = Math.min(minX, points[i]);
-        maxX = Math.max(maxX, points[i]);
-        minY = Math.min(minY, points[i + 1]);
-        maxY = Math.max(maxY, points[i + 1]);
-        minZ = Math.min(minZ, points[i + 2]);
-        maxZ = Math.max(maxZ, points[i + 2]);
+        minX = Infinity; minY = Infinity; minZ = Infinity;
+        maxX = -Infinity; maxY = -Infinity; maxZ = -Infinity;
+
+        for (let i = 0; i < points.length; i += 3) {
+            minX = Math.min(minX, points[i]);
+            maxX = Math.max(maxX, points[i]);
+            minY = Math.min(minY, points[i + 1]);
+            maxY = Math.max(maxY, points[i + 1]);
+            minZ = Math.min(minZ, points[i + 2]);
+            maxZ = Math.max(maxZ, points[i + 2]);
+        }
     }
 
     // Calculate grid dimensions
@@ -641,19 +683,25 @@ function createHeightMapFromPoints(points, gridStep) {
     const grid = new Float32Array(width * height);
     grid.fill(NaN); // Initialize with NaN
 
-    // Fill grid with point data
-    for (let i = 0; i < points.length; i += 3) {
-        const x = points[i];
-        const y = points[i + 1];
-        const z = points[i + 2];
+    // Fill grid with point data (if any points exist)
+    if (points && points.length > 0) {
+        for (let i = 0; i < points.length; i += 3) {
+            const x = points[i];
+            const y = points[i + 1];
+            const z = points[i + 2];
 
-        const gridX = Math.floor((x - minX) / gridStep);
-        const gridY = Math.floor((y - minY) / gridStep);
-        const idx = gridY * width + gridX;
+            const gridX = Math.floor((x - minX) / gridStep);
+            const gridY = Math.floor((y - minY) / gridStep);
 
-        // Keep max Z value for each cell (terrain surface)
-        if (isNaN(grid[idx]) || z > grid[idx]) {
-            grid[idx] = z;
+            // Bounds check
+            if (gridX >= 0 && gridX < width && gridY >= 0 && gridY < height) {
+                const idx = gridY * width + gridX;
+
+                // Keep max Z value for each cell (terrain surface)
+                if (isNaN(grid[idx]) || z > grid[idx]) {
+                    grid[idx] = z;
+                }
+            }
         }
     }
 
@@ -722,14 +770,18 @@ function createSparseToolFromPoints(points, gridStep) {
 }
 
 // Generate toolpath using pure WebGPU
-async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep) {
+async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds = null) {
     const startTime = performance.now();
     console.log('[WebGPU Worker] Generating toolpath...');
     console.log(`[WebGPU Worker] Input: terrain ${terrainPoints.length/3} points, tool ${toolPoints.length/3} points, steps (${xStep}, ${yStep}), oobZ ${oobZ}, gridStep ${gridStep}`);
 
+    if (terrainBounds) {
+        console.log(`[WebGPU Worker] Using terrain bounds: min(${terrainBounds.min.x.toFixed(2)}, ${terrainBounds.min.y.toFixed(2)}, ${terrainBounds.min.z.toFixed(2)}) max(${terrainBounds.max.x.toFixed(2)}, ${terrainBounds.max.y.toFixed(2)}, ${terrainBounds.max.z.toFixed(2)})`);
+    }
+
     try {
-        // Create height map from terrain points
-        const terrainMapData = createHeightMapFromPoints(terrainPoints, gridStep);
+        // Create height map from terrain points (use terrain bounds if provided)
+        const terrainMapData = createHeightMapFromPoints(terrainPoints, gridStep, terrainBounds);
         console.log(`[WebGPU Worker] Created terrain map: ${terrainMapData.width}x${terrainMapData.height}`);
 
         // Create sparse tool representation
@@ -884,8 +936,8 @@ self.onmessage = async function(e) {
                 break;
 
             case 'rasterize':
-                const { triangles, stepSize, filterMode, isForTool } = data;
-                const rasterResult = await rasterizeMesh(triangles, stepSize, filterMode);
+                const { triangles, stepSize, filterMode, isForTool, boundsOverride } = data;
+                const rasterResult = await rasterizeMesh(triangles, stepSize, filterMode, boundsOverride);
                 self.postMessage({
                     type: 'rasterize-complete',
                     data: rasterResult,
@@ -894,9 +946,9 @@ self.onmessage = async function(e) {
                 break;
 
             case 'generate-toolpath':
-                const { terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep } = data;
+                const { terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds } = data;
                 const toolpathResult = await generateToolpath(
-                    terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep
+                    terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds
                 );
                 self.postMessage({
                     type: 'toolpath-complete',
