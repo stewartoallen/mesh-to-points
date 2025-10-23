@@ -644,8 +644,13 @@ function displayToolpath(data) {
     geometry.setAttribute('position', new THREE.BufferAttribute(positionsArray, 3));
 
     // Create material - use red/orange color for toolpath
+    // Scale point size based on the actual step values used
+    const effectiveStep = Math.min(xStep, yStep) * gridStep;
+    const pointSize = effectiveStep * 1.2; // 20% larger than effective step for visibility
+    console.log('displayToolpath: point size', pointSize.toFixed(3), 'mm (xStep:', xStep, 'yStep:', yStep, 'gridStep:', gridStep, ')');
+
     const material = new THREE.PointsMaterial({
-        size: gridStep * 3.0, // Larger than terrain points for visibility
+        size: pointSize,
         color: 0xff4400, // Orange-red
         sizeAttenuation: true
     });
