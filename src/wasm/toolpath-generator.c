@@ -655,6 +655,9 @@ ToolPath* generate_path(HeightMap* terrain, HeightMap* tool,
     return path;
 }
 
+// Global variable to store last sparse tool count for debugging
+static int g_last_sparse_tool_count = 0;
+
 ToolPath* generate_path_partial(HeightMap* terrain, HeightMap* tool,
                                 int x_step, int y_step, float oob_z,
                                 int start_scanline, int end_scanline) {
@@ -664,6 +667,9 @@ ToolPath* generate_path_partial(HeightMap* terrain, HeightMap* tool,
         return NULL;
     }
 
+    // Store sparse tool count for verification
+    g_last_sparse_tool_count = sparse_tool->count;
+
     // Generate partial toolpath using sparse algorithm
     ToolPath* path = generate_toolpath_partial(terrain, sparse_tool, x_step, y_step, oob_z,
                                                 start_scanline, end_scanline);
@@ -672,6 +678,10 @@ ToolPath* generate_path_partial(HeightMap* terrain, HeightMap* tool,
     free_sparse_tool(sparse_tool);
 
     return path;
+}
+
+int get_sparse_tool_count() {
+    return g_last_sparse_tool_count;
 }
 
 void get_path_dimensions(ToolPath* path, int* num_scanlines, int* points_per_line) {

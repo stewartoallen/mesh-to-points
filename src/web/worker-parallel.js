@@ -196,6 +196,16 @@ function generateToolpathPartial(terrainPoints, toolPoints, xStep, yStep, oobZ, 
     const terrainWidth = terrainDims[0];
     const terrainHeight = terrainDims[1];
 
+    // Get tool dimensions
+    const toolDimPtr = toolpathWasm.exports.malloc(8);
+    toolpathWasm.exports.get_map_dimensions(toolMapPtr, toolDimPtr, toolDimPtr + 4);
+    const toolDims = new Int32Array(toolpathMemory.buffer, toolDimPtr, 2);
+    const toolWidth = toolDims[0];
+    const toolHeight = toolDims[1];
+    const toolDenseSize = toolWidth * toolHeight;
+
+    console.log(`[Worker] 📏 Terrain grid: ${terrainWidth}x${terrainHeight}, Tool grid: ${toolWidth}x${toolHeight} (dense size: ${toolDenseSize})`);
+
     const pointsPerLine = Math.ceil(terrainWidth / xStep);
     const numScanlinesTotal = Math.ceil(terrainHeight / yStep);
 
@@ -220,6 +230,11 @@ function generateToolpathPartial(terrainPoints, toolPoints, xStep, yStep, oobZ, 
     const t3 = performance.now();
     console.log(`[Worker] ⏱️  Generate path (PARTIAL): ${(t3 - t2).toFixed(1)}ms`);
 
+    // Get sparse tool count for verification
+    const sparseToolCount = toolpathWasm.exports.get_sparse_tool_count();
+    const sparsityRatio = ((1 - sparseToolCount / toolDenseSize) * 100).toFixed(1);
+    console.log(`[Worker] 🔧 Sparse tool: ${sparseToolCount} records vs ${toolDenseSize} dense (${sparsityRatio}% sparse)`);
+
     // Get dimensions of partial path
     const dimPtr = toolpathWasm.exports.malloc(8);
     toolpathWasm.exports.get_path_dimensions(toolpathPtr, dimPtr, dimPtr + 4);
@@ -240,6 +255,7 @@ function generateToolpathPartial(terrainPoints, toolPoints, xStep, yStep, oobZ, 
 
     // Free memory
     toolpathWasm.exports.free(terrainDimPtr);
+    toolpathWasm.exports.free(toolDimPtr);
     toolpathWasm.exports.free(dimPtr);
     toolpathWasm.exports.free(pathDataPtr);
     toolpathWasm.exports.free_toolpath(toolpathPtr);

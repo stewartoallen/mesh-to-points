@@ -251,8 +251,8 @@ async function generateToolpathParallel(terrainPoints, toolPoints, xStep, yStep,
 console.log('=== Parallel Toolpath Generation Test ===\n');
 
 const stepSize = 0.05;
-const xStep = 5;
-const yStep = 5;
+const xStep = 1;
+const yStep = 1;
 const oobZ = -100.0;
 
 // Load and convert terrain
