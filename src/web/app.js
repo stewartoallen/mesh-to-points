@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { initWebGPU, generateToolpathWebGPU } from './toolpath-webgpu.js?v=7';
 import { generateToolpathWebGPUv2 } from './toolpath-webgpu-v2.js?v=1';
+import { initWebGPURasterizer, rasterizeMeshWebGPU } from './webgpu-rasterize.js?v=1';
+import { parseSTL } from './parse-stl.js?v=1';
 
 // Configuration
 let STEP_SIZE = 0.1; // mm (default, can be changed via dropdown)
@@ -12,6 +14,7 @@ const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const stepSizeSelect = document.getElementById('step-size-select');
 const recomputeBtn = document.getElementById('recompute-btn');
+const conversionMethodSelect = document.getElementById('conversion-method-select');
 const infoPanel = document.getElementById('info');
 const statusEl = document.getElementById('status');
 const pointCountEl = document.getElementById('point-count');
@@ -169,37 +172,74 @@ function initScene() {
             // Clear tool data so it needs to be regenerated
             toolData = null;
 
-            // Recompute terrain - need to read file fresh
+            // Recompute terrain - respect conversion method
             console.log('Recomputing terrain with step size:', STEP_SIZE, 'mm');
-            const terrainReader = new FileReader();
-            terrainReader.onload = function(e) {
-                terrainWorker.postMessage({
-                    type: 'process-stl',
-                    data: {
-                        buffer: e.target.result,
-                        stepSize: STEP_SIZE,
-                        filterMode: 0 // FILTER_UPWARD_FACING for terrain
-                    }
-                }, [e.target.result]);
-            };
-            terrainReader.readAsArrayBuffer(lastLoadedFile);
+            const conversionMethod = conversionMethodSelect.value;
 
-            // If tool was loaded, recompute it too
-            if (toolFile) {
-                console.log('Recomputing tool with step size:', STEP_SIZE, 'mm');
+            if (conversionMethod === 'webgpu') {
+                // WebGPU path
+                processFileWebGPU(lastLoadedFile);
 
-                const toolReader = new FileReader();
-                toolReader.onload = function(e) {
-                    toolWorker.postMessage({
+                // If tool was loaded, recompute it too
+                if (toolFile) {
+                    console.log('Recomputing tool with step size:', STEP_SIZE, 'mm');
+                    setTimeout(async () => {
+                        try {
+                            updateStatus('Recomputing tool...');
+                            const buffer = await toolFile.arrayBuffer();
+                            const { positions, triangleCount } = parseSTL(buffer);
+                            console.log('Parsed tool STL:', triangleCount, 'triangles');
+
+                            const startTime = performance.now();
+                            const result = await rasterizeMeshWebGPU(positions, STEP_SIZE, 1); // 1 = DOWNWARD_FACING
+                            const endTime = performance.now();
+
+                            console.log('WebGPU tool rasterization complete:', result.pointCount, 'points in', (endTime - startTime).toFixed(1), 'ms');
+
+                            timingData.toolConversion = endTime - startTime;
+                            updateTimingPanel();
+
+                            toolData = result;
+                            displayTool(result);
+                            updateStatus('Recompute complete');
+                        } catch (error) {
+                            console.error('Error recomputing tool:', error);
+                            updateStatus('Error: ' + error.message);
+                        }
+                    }, 100);
+                }
+            } else {
+                // WASM worker path
+                const terrainReader = new FileReader();
+                terrainReader.onload = function(e) {
+                    terrainWorker.postMessage({
                         type: 'process-stl',
                         data: {
                             buffer: e.target.result,
                             stepSize: STEP_SIZE,
-                            filterMode: 1 // FILTER_DOWNWARD_FACING for tool
+                            filterMode: 0 // FILTER_UPWARD_FACING for terrain
                         }
                     }, [e.target.result]);
                 };
-                toolReader.readAsArrayBuffer(toolFile);
+                terrainReader.readAsArrayBuffer(lastLoadedFile);
+
+                // If tool was loaded, recompute it too
+                if (toolFile) {
+                    console.log('Recomputing tool with step size:', STEP_SIZE, 'mm');
+
+                    const toolReader = new FileReader();
+                    toolReader.onload = function(e) {
+                        toolWorker.postMessage({
+                            type: 'process-stl',
+                            data: {
+                                buffer: e.target.result,
+                                stepSize: STEP_SIZE,
+                                filterMode: 1 // FILTER_DOWNWARD_FACING for tool
+                            }
+                        }, [e.target.result]);
+                    };
+                    toolReader.readAsArrayBuffer(toolFile);
+                }
             }
         }
     });
@@ -225,7 +265,7 @@ const NUM_PARALLEL_WORKERS = 4; // Number of parallel workers for toolpath gener
 
 // Web Worker setup
 async function initWorkers() {
-    // Initialize WebGPU
+    // Initialize WebGPU for toolpath
     const webgpuAvailable = await initWebGPU();
     if (!webgpuAvailable) {
         console.warn('⚠️ WebGPU not available, disabling option');
@@ -235,6 +275,20 @@ async function initWorkers() {
             webgpuOption.disabled = true;
             webgpuOption.text += ' (not available)';
         }
+    }
+
+    // Initialize WebGPU rasterizer
+    const rasterizerAvailable = await initWebGPURasterizer();
+    if (!rasterizerAvailable) {
+        console.warn('⚠️ WebGPU rasterizer not available, disabling option');
+        // Disable WebGPU conversion option
+        const conversionWebGPUOption = conversionMethodSelect.querySelector('option[value="webgpu"]');
+        if (conversionWebGPUOption) {
+            conversionWebGPUOption.disabled = true;
+            conversionWebGPUOption.text += ' (not available)';
+        }
+        // Default to WASM
+        conversionMethodSelect.value = 'wasm';
         // Default to workers
         backendSelect.value = 'workers';
     }
@@ -744,7 +798,48 @@ function base64ToArrayBuffer(base64) {
     return bytes.buffer;
 }
 
+async function processFileWebGPU(file) {
+    updateStatus('Loading file...');
+
+    try {
+        const buffer = await file.arrayBuffer();
+        console.log('File loaded, buffer size:', buffer.byteLength);
+
+        updateStatus('Parsing STL...');
+        const { positions, triangleCount } = parseSTL(buffer);
+        console.log('Parsed STL:', triangleCount, 'triangles');
+
+        updateStatus('Rasterizing with WebGPU...');
+        const startTime = performance.now();
+        const result = await rasterizeMeshWebGPU(positions, STEP_SIZE, 0); // 0 = UPWARD_FACING for terrain
+        const endTime = performance.now();
+
+        console.log('WebGPU rasterization complete:', result.pointCount, 'points in', (endTime - startTime).toFixed(1), 'ms');
+
+        // Store timing
+        timingData.terrainConversion = endTime - startTime;
+        updateTimingPanel();
+
+        // Store and display result
+        terrainData = result;
+        displayPointCloud(result);
+        updateStatus('Terrain complete');
+    } catch (error) {
+        console.error('Error processing file with WebGPU:', error);
+        updateStatus('Error: ' + error.message);
+        alert('Error: ' + error.message);
+    }
+}
+
 function processFile(file) {
+    const conversionMethod = conversionMethodSelect.value;
+
+    if (conversionMethod === 'webgpu') {
+        processFileWebGPU(file);
+        return;
+    }
+
+    // Original WASM worker path
     updateStatus('Loading file...');
 
     const reader = new FileReader();
@@ -832,21 +927,49 @@ toolFileInput.addEventListener('change', async (e) => {
             console.log('Converting tool STL:', file.name);
             updateStatus('Converting tool...');
 
+            const conversionMethod = conversionMethodSelect.value;
+
             try {
-                const buffer = await file.arrayBuffer();
+                if (conversionMethod === 'webgpu') {
+                    // WebGPU path
+                    const buffer = await file.arrayBuffer();
+                    const { positions, triangleCount } = parseSTL(buffer);
+                    console.log('Parsed tool STL:', triangleCount, 'triangles');
 
-                // Send to tool worker
-                toolWorker.postMessage({
-                    type: 'process-stl',
-                    data: {
-                        buffer: buffer,
-                        stepSize: STEP_SIZE,
-                        filterMode: 1 // FILTER_DOWNWARD_FACING for tool
-                    }
-                }, [buffer]);
+                    const startTime = performance.now();
+                    const result = await rasterizeMeshWebGPU(positions, STEP_SIZE, 1); // 1 = DOWNWARD_FACING for tool
+                    const endTime = performance.now();
 
-                // Enable generate button
-                generateToolpathBtn.disabled = false;
+                    console.log('WebGPU tool rasterization complete:', result.pointCount, 'points in', (endTime - startTime).toFixed(1), 'ms');
+
+                    // Store timing
+                    timingData.toolConversion = endTime - startTime;
+                    updateTimingPanel();
+
+                    // Store and display result
+                    toolData = result;
+                    displayTool(result);
+                    updateStatus('Tool complete');
+
+                    // Enable generate button
+                    generateToolpathBtn.disabled = false;
+                } else {
+                    // WASM worker path
+                    const buffer = await file.arrayBuffer();
+
+                    // Send to tool worker
+                    toolWorker.postMessage({
+                        type: 'process-stl',
+                        data: {
+                            buffer: buffer,
+                            stepSize: STEP_SIZE,
+                            filterMode: 1 // FILTER_DOWNWARD_FACING for tool
+                        }
+                    }, [buffer]);
+
+                    // Enable generate button
+                    generateToolpathBtn.disabled = false;
+                }
             } catch (error) {
                 console.error('Error loading tool:', error);
                 alert('Error loading tool: ' + error.message);
