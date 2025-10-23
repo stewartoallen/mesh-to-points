@@ -95,18 +95,42 @@
         </div>
 
         <div id="timing-panel" class="timing-panel hidden">
-            <h4>Timing</h4>
-            <div class="timing-item">
-                <span class="timing-label">Terrain Conv:</span>
-                <span id="timing-terrain" class="timing-value">-</span>
+            <h4>Performance</h4>
+            <div class="timing-section">
+                <div class="timing-header">Time</div>
+                <div class="timing-item">
+                    <span class="timing-label">Terrain:</span>
+                    <span id="timing-terrain" class="timing-value">-</span>
+                </div>
+                <div class="timing-item">
+                    <span class="timing-label">Tool:</span>
+                    <span id="timing-tool" class="timing-value">-</span>
+                </div>
+                <div class="timing-item">
+                    <span class="timing-label">Toolpath:</span>
+                    <span id="timing-toolpath" class="timing-value">-</span>
+                </div>
             </div>
-            <div class="timing-item">
-                <span class="timing-label">Tool Conv:</span>
-                <span id="timing-tool" class="timing-value">-</span>
+            <div class="timing-section">
+                <div class="timing-header">Memory (JS)</div>
+                <div class="timing-item">
+                    <span class="timing-label">Terrain:</span>
+                    <span id="memory-terrain" class="timing-value">-</span>
+                </div>
+                <div class="timing-item">
+                    <span class="timing-label">Tool:</span>
+                    <span id="memory-tool" class="timing-value">-</span>
+                </div>
+                <div class="timing-item">
+                    <span class="timing-label">Toolpath:</span>
+                    <span id="memory-toolpath" class="timing-value">-</span>
+                </div>
             </div>
-            <div class="timing-item">
-                <span class="timing-label">Toolpath Gen:</span>
-                <span id="timing-toolpath" class="timing-value">-</span>
+            <div class="timing-section">
+                <div class="timing-header">Total JS Heap</div>
+                <div class="timing-item">
+                    <span id="memory-total" class="timing-value-large">-</span>
+                </div>
             </div>
         </div>
 

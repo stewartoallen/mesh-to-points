@@ -42,6 +42,10 @@ const timingPanel = document.getElementById('timing-panel');
 const timingTerrainEl = document.getElementById('timing-terrain');
 const timingToolEl = document.getElementById('timing-tool');
 const timingToolpathEl = document.getElementById('timing-toolpath');
+const memoryTerrainEl = document.getElementById('memory-terrain');
+const memoryToolEl = document.getElementById('memory-tool');
+const memoryToolpathEl = document.getElementById('memory-toolpath');
+const memoryTotalEl = document.getElementById('memory-total');
 
 // Store last loaded file for recompute
 let lastLoadedFile = null;
@@ -64,12 +68,48 @@ let webgpuWorker = null;
 // Store STL bounds for bounds override feature
 let stlBounds = null;
 
-// Timing data
+// Timing and memory data
 let timingData = {
     terrainConversion: null,
     toolConversion: null,
     toolpathGeneration: null
 };
+
+let memoryData = {
+    terrain: null,
+    tool: null,
+    toolpath: null
+};
+
+// Helper: Format bytes to human readable
+function formatBytes(bytes) {
+    if (bytes === 0 || bytes === null) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// Helper: Calculate memory usage of data
+function calculateMemory(data) {
+    if (!data) return 0;
+    let bytes = 0;
+
+    // Positions (Float32Array)
+    if (data.positions) {
+        bytes += data.positions.byteLength;
+    }
+
+    // Path data (Float32Array)
+    if (data.pathData) {
+        bytes += data.pathData.byteLength;
+    }
+
+    // Add overhead for object structure (rough estimate)
+    bytes += 1024; // ~1KB overhead
+
+    return bytes;
+}
 
 // Helper: Get bounds override from UI inputs
 function getBoundsOverride() {
@@ -471,11 +511,12 @@ function handleRasterizeComplete(data, isForTool) {
         displayTool(data);
         updateStatus('Tool complete');
 
-        // Store timing
+        // Store timing and memory
         if (data.conversionTime !== undefined) {
             timingData.toolConversion = data.conversionTime;
-            updateTimingPanel();
         }
+        memoryData.tool = calculateMemory(data);
+        updateTimingPanel();
 
         // Enable generate button
         generateToolpathBtn.disabled = false;
@@ -484,11 +525,12 @@ function handleRasterizeComplete(data, isForTool) {
         displayPointCloud(data);
         updateStatus('Terrain complete');
 
-        // Store timing
+        // Store timing and memory
         if (data.conversionTime !== undefined) {
             timingData.terrainConversion = data.conversionTime;
-            updateTimingPanel();
         }
+        memoryData.terrain = calculateMemory(data);
+        updateTimingPanel();
 
         // Auto-populate bounds if custom bounds is enabled and inputs are empty
         if (useBoundsOverride.checked && !boundsMinX.value) {
@@ -503,8 +545,9 @@ function handleToolpathComplete(data) {
     updateStatus('Toolpath complete (webgpu)');
     generateToolpathBtn.disabled = false;
 
-    // Store timing
+    // Store timing and memory
     timingData.toolpathGeneration = data.generationTime;
+    memoryData.toolpath = calculateMemory(data);
     updateTimingPanel();
 
     // Enable clear button
@@ -689,6 +732,7 @@ function displayTool(data) {
 
 // Update timing panel
 function updateTimingPanel() {
+    // Update timing values
     if (timingData.terrainConversion !== null) {
         timingTerrainEl.textContent = timingData.terrainConversion.toFixed(2) + ' ms';
     }
@@ -697,6 +741,24 @@ function updateTimingPanel() {
     }
     if (timingData.toolpathGeneration !== null) {
         timingToolpathEl.textContent = timingData.toolpathGeneration.toFixed(2) + ' ms';
+    }
+
+    // Update memory values
+    if (memoryData.terrain !== null) {
+        memoryTerrainEl.textContent = formatBytes(memoryData.terrain);
+    }
+    if (memoryData.tool !== null) {
+        memoryToolEl.textContent = formatBytes(memoryData.tool);
+    }
+    if (memoryData.toolpath !== null) {
+        memoryToolpathEl.textContent = formatBytes(memoryData.toolpath);
+    }
+
+    // Update total JS heap if available
+    if (performance.memory) {
+        memoryTotalEl.textContent = formatBytes(performance.memory.usedJSHeapSize);
+    } else {
+        memoryTotalEl.textContent = 'N/A';
     }
 
     // Show panel if any timing data exists
