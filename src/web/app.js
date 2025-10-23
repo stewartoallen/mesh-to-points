@@ -11,7 +11,6 @@ const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const stepSizeSelect = document.getElementById('step-size-select');
 const recomputeBtn = document.getElementById('recompute-btn');
-const conversionMethodSelect = document.getElementById('conversion-method-select');
 const infoPanel = document.getElementById('info');
 const statusEl = document.getElementById('status');
 const pointCountEl = document.getElementById('point-count');
@@ -23,7 +22,6 @@ const toolFilenameEl = document.getElementById('tool-filename');
 const xStepInput = document.getElementById('x-step-input');
 const yStepInput = document.getElementById('y-step-input');
 const zFloorInput = document.getElementById('z-floor-input');
-const backendSelect = document.getElementById('backend-select');
 const generateToolpathBtn = document.getElementById('generate-toolpath-btn');
 const clearToolpathBtn = document.getElementById('clear-toolpath-btn');
 
@@ -170,11 +168,10 @@ function initScene() {
             // Clear tool data so it needs to be regenerated
             toolData = null;
 
-            // Recompute terrain - respect conversion method
+            // Recompute terrain using WebGPU
             console.log('Recomputing terrain with step size:', STEP_SIZE, 'mm');
-            const conversionMethod = conversionMethodSelect.value;
 
-            if (conversionMethod === 'webgpu') {
+            {
                 // WebGPU path
                 processFileWebGPU(lastLoadedFile);
 
@@ -203,38 +200,6 @@ function initScene() {
                             updateStatus('Error: ' + error.message);
                         }
                     }, 100);
-                }
-            } else {
-                // WASM worker path
-                const terrainReader = new FileReader();
-                terrainReader.onload = function(e) {
-                    terrainWorker.postMessage({
-                        type: 'process-stl',
-                        data: {
-                            buffer: e.target.result,
-                            stepSize: STEP_SIZE,
-                            filterMode: 0 // FILTER_UPWARD_FACING for terrain
-                        }
-                    }, [e.target.result]);
-                };
-                terrainReader.readAsArrayBuffer(lastLoadedFile);
-
-                // If tool was loaded, recompute it too
-                if (toolFile) {
-                    console.log('Recomputing tool with step size:', STEP_SIZE, 'mm');
-
-                    const toolReader = new FileReader();
-                    toolReader.onload = function(e) {
-                        toolWorker.postMessage({
-                            type: 'process-stl',
-                            data: {
-                                buffer: e.target.result,
-                                stepSize: STEP_SIZE,
-                                filterMode: 1 // FILTER_DOWNWARD_FACING for tool
-                            }
-                        }, [e.target.result]);
-                    };
-                    toolReader.readAsArrayBuffer(toolFile);
                 }
             }
         }
@@ -279,21 +244,9 @@ async function initWorkers() {
     const webgpuAvailable = await webgpuReady;
 
     if (!webgpuAvailable) {
-        console.warn('⚠️ WebGPU not available, disabling option');
-        // Disable WebGPU options
-        const webgpuOption = backendSelect.querySelector('option[value="webgpu"]');
-        if (webgpuOption) {
-            webgpuOption.disabled = true;
-            webgpuOption.text += ' (not available)';
-        }
-        const conversionWebGPUOption = conversionMethodSelect.querySelector('option[value="webgpu"]');
-        if (conversionWebGPUOption) {
-            conversionWebGPUOption.disabled = true;
-            conversionWebGPUOption.text += ' (not available)';
-        }
-        // Default to WASM
-        conversionMethodSelect.value = 'wasm';
-        backendSelect.value = 'workers';
+        console.error('❌ WebGPU not available - application requires WebGPU support');
+        updateStatus('Error: WebGPU not available');
+        return;
     }
 
     // Set up WebGPU worker message handler
@@ -328,94 +281,7 @@ async function initWorkers() {
         updateStatus('WebGPU worker error');
     };
 
-    // Terrain worker
-    terrainWorker = new Worker('worker.js');
-    terrainWorker.onmessage = function(e) {
-        const { type, data, message } = e.data;
-        console.log('Terrain worker received message:', type);
-
-        switch (type) {
-            case 'wasm-ready':
-                console.log('Terrain worker WASM ready');
-                break;
-
-            case 'status':
-                console.log('Terrain worker status:', message);
-                updateStatus(message);
-                break;
-
-            case 'conversion-complete':
-                console.log('Terrain worker: conversion complete, points:', data.pointCount);
-                terrainData = data;
-                displayPointCloud(data);
-                updateStatus('Terrain complete');
-
-                // Store timing
-                if (e.data.conversionTime !== undefined) {
-                    timingData.terrainConversion = e.data.conversionTime;
-                    updateTimingPanel();
-                }
-                break;
-
-            case 'error':
-                console.error('Terrain worker error:', message);
-                updateStatus('Error: ' + message);
-                alert('Error: ' + message);
-                break;
-        }
-    };
-
-    terrainWorker.onerror = function(error) {
-        console.error('Terrain worker error:', error);
-        updateStatus('Terrain worker error');
-    };
-
-    // Tool worker
-    toolWorker = new Worker('worker.js');
-    toolWorker.onmessage = function(e) {
-        const { type, data, message } = e.data;
-
-        switch (type) {
-            case 'wasm-ready':
-                console.log('Tool worker WASM ready');
-                break;
-
-            case 'status':
-                updateStatus(message);
-                break;
-
-            case 'conversion-complete':
-                toolData = data;
-                console.log('Tool loaded:', data.pointCount, 'points');
-
-                // Store timing
-                if (e.data.conversionTime !== undefined) {
-                    timingData.toolConversion = e.data.conversionTime;
-                    updateTimingPanel();
-                }
-
-                // Display tool above terrain
-                displayTool(data);
-                updateStatus('Tool complete');
-                break;
-
-            case 'error':
-                console.error('Tool worker error:', message);
-                updateStatus('Error: ' + message);
-                alert('Error: ' + message);
-                break;
-        }
-    };
-
-    toolWorker.onerror = function(error) {
-        console.error('Tool worker error:', error);
-        updateStatus('Tool worker error');
-    };
-
-    // Toolpath worker - REPLACED WITH PARALLEL COORDINATOR
-    // We'll create workers on-demand when generating toolpath
-    toolpathWorker = null; // No longer using single worker
-    console.log('✓ Workers initialized (parallel mode with', NUM_PARALLEL_WORKERS, 'workers)');
+    console.log('✓ WebGPU worker initialized');
 
     // Auto-load last files from localStorage
     setTimeout(() => {
@@ -936,42 +802,8 @@ async function processFileWebGPU(file) {
 }
 
 function processFile(file) {
-    const conversionMethod = conversionMethodSelect.value;
-
-    if (conversionMethod === 'webgpu') {
-        processFileWebGPU(file);
-        return;
-    }
-
-    // Original WASM worker path
-    updateStatus('Loading file...');
-
-    const reader = new FileReader();
-
-    reader.onload = function(e) {
-        const buffer = e.target.result;
-        console.log('File loaded, buffer size:', buffer.byteLength);
-
-        // Send to terrain worker for processing
-        // Terrain uses upward-facing filter (0)
-        console.log('Sending to terrain worker...');
-        terrainWorker.postMessage({
-            type: 'process-stl',
-            data: {
-                buffer: buffer,
-                stepSize: STEP_SIZE,
-                filterMode: 0 // FILTER_UPWARD_FACING for terrain
-            }
-        }, [buffer]); // Transfer buffer ownership
-        console.log('Message sent to terrain worker');
-    };
-
-    reader.onerror = function() {
-        updateStatus('Error reading file');
-        alert('Failed to read file');
-    };
-
-    reader.readAsArrayBuffer(file);
+    // Always use WebGPU
+    processFileWebGPU(file);
 }
 
 // Drag and drop handlers
@@ -1031,42 +863,22 @@ toolFileInput.addEventListener('change', async (e) => {
             console.log('Converting tool STL:', file.name);
             updateStatus('Converting tool...');
 
-            const conversionMethod = conversionMethodSelect.value;
-
             try {
-                if (conversionMethod === 'webgpu') {
-                    // WebGPU worker path
-                    const buffer = await file.arrayBuffer();
-                    const { positions, triangleCount } = parseSTL(buffer);
-                    console.log('Parsed tool STL:', triangleCount, 'triangles');
+                // WebGPU worker path
+                const buffer = await file.arrayBuffer();
+                const { positions, triangleCount } = parseSTL(buffer);
+                console.log('Parsed tool STL:', triangleCount, 'triangles');
 
-                    // Send to WebGPU worker
-                    webgpuWorker.postMessage({
-                        type: 'rasterize',
-                        data: {
-                            triangles: positions,
-                            stepSize: STEP_SIZE,
-                            filterMode: 1, // 1 = DOWNWARD_FACING for tool
-                            isForTool: true
-                        }
-                    }, [positions.buffer]);
-                } else {
-                    // WASM worker path
-                    const buffer = await file.arrayBuffer();
-
-                    // Send to tool worker
-                    toolWorker.postMessage({
-                        type: 'process-stl',
-                        data: {
-                            buffer: buffer,
-                            stepSize: STEP_SIZE,
-                            filterMode: 1 // FILTER_DOWNWARD_FACING for tool
-                        }
-                    }, [buffer]);
-
-                    // Enable generate button
-                    generateToolpathBtn.disabled = false;
-                }
+                // Send to WebGPU worker
+                webgpuWorker.postMessage({
+                    type: 'rasterize',
+                    data: {
+                        triangles: positions,
+                        stepSize: STEP_SIZE,
+                        filterMode: 1, // 1 = DOWNWARD_FACING for tool
+                        isForTool: true
+                    }
+                }, [positions.buffer]);
             } catch (error) {
                 console.error('Error loading tool:', error);
                 alert('Error loading tool: ' + error.message);
@@ -1282,9 +1094,8 @@ generateToolpathBtn.addEventListener('click', async () => {
         return;
     }
 
-    const backend = backendSelect.value;
-    console.log(`🎯 Starting toolpath generation (${backend})...`);
-    updateStatus(`Generating toolpath (${backend})...`);
+    console.log('🎯 Starting toolpath generation (webgpu)...');
+    updateStatus('Generating toolpath (webgpu)...');
 
     // Disable button during processing
     generateToolpathBtn.disabled = true;
@@ -1296,63 +1107,20 @@ generateToolpathBtn.addEventListener('click', async () => {
 
         console.log('Parameters: X step:', xStep, 'Y step:', yStep, 'Z floor:', zFloor, 'Grid step:', STEP_SIZE);
 
-        let result;
-
-        // Select backend
-        switch (backend) {
-            case 'webgpu':
-                // Send to WebGPU worker (COPY data, don't transfer - we need to keep it)
-                webgpuWorker.postMessage({
-                    type: 'generate-toolpath',
-                    data: {
-                        terrainPoints: terrainData.positions,
-                        toolPoints: toolData.positions,
-                        xStep,
-                        yStep,
-                        oobZ: zFloor,
-                        gridStep: STEP_SIZE
-                    }
-                });
-                // Result will be handled by the worker message handler
-                return; // Exit early since async
-
-            case 'workers':
-                result = await generateToolpathParallel(
-                    terrainData.positions,
-                    toolData.positions,
-                    xStep,
-                    yStep,
-                    zFloor,
-                    STEP_SIZE
-                );
-                break;
-
-            case 'wasm':
-                result = await generateToolpathSingle(
-                    terrainData.positions,
-                    toolData.positions,
-                    xStep,
-                    yStep,
-                    zFloor,
-                    STEP_SIZE
-                );
-                break;
-
-            default:
-                throw new Error('Unknown backend: ' + backend);
-        }
-
-        // Display result
-        displayToolpath(result);
-        updateStatus(`Toolpath complete (${backend})`);
-        generateToolpathBtn.disabled = false;
-
-        // Store timing
-        timingData.toolpathGeneration = result.generationTime;
-        updateTimingPanel();
-
-        // Enable clear button
-        clearToolpathBtn.disabled = false;
+        // Send to WebGPU worker (COPY data, don't transfer - we need to keep it)
+        webgpuWorker.postMessage({
+            type: 'generate-toolpath',
+            data: {
+                terrainPoints: terrainData.positions,
+                toolPoints: toolData.positions,
+                xStep,
+                yStep,
+                oobZ: zFloor,
+                gridStep: STEP_SIZE
+            }
+        });
+        // Result will be handled by the worker message handler
+        return; // Exit early since async
 
     } catch (error) {
         console.error('Error generating toolpath:', error);

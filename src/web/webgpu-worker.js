@@ -616,55 +616,136 @@ async function rasterizeMesh(triangles, stepSize, filterMode) {
     };
 }
 
-// Generate toolpath using WebGPU with WASM-generated height maps
+// Helper: Create height map from point cloud
+function createHeightMapFromPoints(points, gridStep) {
+    if (!points || points.length === 0) {
+        throw new Error('No points provided');
+    }
+
+    // Find bounds
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+    for (let i = 0; i < points.length; i += 3) {
+        minX = Math.min(minX, points[i]);
+        maxX = Math.max(maxX, points[i]);
+        minY = Math.min(minY, points[i + 1]);
+        maxY = Math.max(maxY, points[i + 1]);
+        minZ = Math.min(minZ, points[i + 2]);
+        maxZ = Math.max(maxZ, points[i + 2]);
+    }
+
+    // Calculate grid dimensions
+    const width = Math.ceil((maxX - minX) / gridStep) + 1;
+    const height = Math.ceil((maxY - minY) / gridStep) + 1;
+    const grid = new Float32Array(width * height);
+    grid.fill(NaN); // Initialize with NaN
+
+    // Fill grid with point data
+    for (let i = 0; i < points.length; i += 3) {
+        const x = points[i];
+        const y = points[i + 1];
+        const z = points[i + 2];
+
+        const gridX = Math.floor((x - minX) / gridStep);
+        const gridY = Math.floor((y - minY) / gridStep);
+        const idx = gridY * width + gridX;
+
+        // Keep max Z value for each cell (terrain surface)
+        if (isNaN(grid[idx]) || z > grid[idx]) {
+            grid[idx] = z;
+        }
+    }
+
+    return {
+        grid,
+        width,
+        height,
+        minX,
+        minY,
+        minZ,
+        maxX,
+        maxY,
+        maxZ
+    };
+}
+
+// Helper: Create sparse tool representation
+function createSparseToolFromPoints(points, gridStep) {
+    if (!points || points.length === 0) {
+        throw new Error('No tool points provided');
+    }
+
+    // Find tool reference point (minimum Z = tool tip)
+    let minZ = Infinity;
+    for (let i = 2; i < points.length; i += 3) {
+        minZ = Math.min(minZ, points[i]);
+    }
+
+    // Find tool bounds for offset calculation
+    let minX = Infinity, minY = Infinity;
+    let maxX = -Infinity, maxY = -Infinity;
+    for (let i = 0; i < points.length; i += 3) {
+        minX = Math.min(minX, points[i]);
+        maxX = Math.max(maxX, points[i]);
+        minY = Math.min(minY, points[i + 1]);
+        maxY = Math.max(maxY, points[i + 1]);
+    }
+
+    // Create offset-based sparse representation
+    const xOffsets = [];
+    const yOffsets = [];
+    const zValues = [];
+
+    for (let i = 0; i < points.length; i += 3) {
+        const x = points[i];
+        const y = points[i + 1];
+        const z = points[i + 2];
+
+        // Calculate integer offsets from tool center (in grid units)
+        const xOffset = Math.round((x - minX - (maxX - minX) / 2) / gridStep);
+        const yOffset = Math.round((y - minY - (maxY - minY) / 2) / gridStep);
+        const zValue = z - minZ; // Z relative to tool tip
+
+        xOffsets.push(xOffset);
+        yOffsets.push(yOffset);
+        zValues.push(zValue);
+    }
+
+    return {
+        count: xOffsets.length,
+        xOffsets: new Int32Array(xOffsets),
+        yOffsets: new Int32Array(yOffsets),
+        zValues: new Float32Array(zValues),
+        referenceZ: minZ
+    };
+}
+
+// Generate toolpath using pure WebGPU
 async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep) {
     const startTime = performance.now();
     console.log('[WebGPU Worker] Generating toolpath...');
     console.log(`[WebGPU Worker] Input: terrain ${terrainPoints.length/3} points, tool ${toolPoints.length/3} points, steps (${xStep}, ${yStep}), oobZ ${oobZ}, gridStep ${gridStep}`);
 
-    // Create a worker to generate WASM height maps
-    const wasmWorker = new Worker('worker-parallel.js');
+    try {
+        // Create height map from terrain points
+        const terrainMapData = createHeightMapFromPoints(terrainPoints, gridStep);
+        console.log(`[WebGPU Worker] Created terrain map: ${terrainMapData.width}x${terrainMapData.height}`);
 
-    return new Promise(async (resolve, reject) => {
-        let terrainMapData = null;
-        let sparseToolData = null;
+        // Create sparse tool representation
+        const sparseToolData = createSparseToolFromPoints(toolPoints, gridStep);
+        console.log(`[WebGPU Worker] Created sparse tool: ${sparseToolData.count} points`);
 
-        wasmWorker.onmessage = async function(e) {
-            const { type, data } = e.data;
+        // Run WebGPU compute
+        const result = await runToolpathCompute(
+            terrainMapData, sparseToolData, xStep, yStep, oobZ, startTime
+        );
 
-            if (type === 'wasm-ready') {
-                // Request terrain map creation
-                wasmWorker.postMessage({
-                    type: 'create-maps',
-                    data: { terrainPoints, toolPoints, gridStep }
-                });
-            } else if (type === 'maps-created') {
-                terrainMapData = data.terrain;
-                sparseToolData = data.sparseTool;
-
-                wasmWorker.terminate();
-
-                console.log(`[WebGPU Worker] Got WASM maps: terrain ${terrainMapData.width}x${terrainMapData.height}, sparse tool ${sparseToolData.count} points`);
-
-                try {
-                    const result = await runToolpathCompute(
-                        terrainMapData, sparseToolData, xStep, yStep, oobZ, startTime
-                    );
-                    resolve(result);
-                } catch (error) {
-                    reject(error);
-                }
-            } else if (type === 'error') {
-                wasmWorker.terminate();
-                reject(new Error(data.message));
-            }
-        };
-
-        wasmWorker.onerror = function(error) {
-            wasmWorker.terminate();
-            reject(error);
-        };
-    });
+        return result;
+    } catch (error) {
+        console.error('[WebGPU Worker] Error generating toolpath:', error);
+        throw error;
+    }
 }
 
 async function runToolpathCompute(terrainMapData, sparseToolData, xStep, yStep, oobZ, startTime) {
