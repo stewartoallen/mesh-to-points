@@ -14,6 +14,8 @@
     "serve": "npx serve build",
     "test:native": "gcc -I src/wasm src/test/test-converter-new.c src/wasm/mesh-converter-lib.c -o test-converter-new -lm -O2 && ./test-converter-new benchmark/fixtures/inner.stl 0.1",
     "test:wasm": "npm run build:wasm && node src/test/test-wasm.cjs",
+    "test:backends": "npm run build && node src/test/test-backends.mjs",
+    "test:webgpu": "npm run build && electron src/test/electron-test.js",
     "test": "npm run test:native && npm run test:wasm",
     "validate": "bash benchmark/validate-optimizations.sh"
   },
@@ -29,6 +31,7 @@
   "author": "",
   "license": "MIT",
   "devDependencies": {
+    "electron": "^28.0.0",
     "serve": "^14.2.1"
   }
 }

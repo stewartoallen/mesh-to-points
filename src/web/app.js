@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { initWebGPU, generateToolpathWebGPU } from './toolpath-webgpu.js';
 
 // Configuration
 let STEP_SIZE = 0.1; // mm (default, can be changed via dropdown)
@@ -21,6 +22,7 @@ const toolFilenameEl = document.getElementById('tool-filename');
 const xStepInput = document.getElementById('x-step-input');
 const yStepInput = document.getElementById('y-step-input');
 const zFloorInput = document.getElementById('z-floor-input');
+const backendSelect = document.getElementById('backend-select');
 const generateToolpathBtn = document.getElementById('generate-toolpath-btn');
 const clearToolpathBtn = document.getElementById('clear-toolpath-btn');
 
@@ -221,7 +223,21 @@ function onWindowResize() {
 const NUM_PARALLEL_WORKERS = 4; // Number of parallel workers for toolpath generation
 
 // Web Worker setup
-function initWorkers() {
+async function initWorkers() {
+    // Initialize WebGPU
+    const webgpuAvailable = await initWebGPU();
+    if (!webgpuAvailable) {
+        console.warn('⚠️ WebGPU not available, disabling option');
+        // Disable WebGPU option in dropdown
+        const webgpuOption = backendSelect.querySelector('option[value="webgpu"]');
+        if (webgpuOption) {
+            webgpuOption.disabled = true;
+            webgpuOption.text += ' (not available)';
+        }
+        // Default to workers
+        backendSelect.value = 'workers';
+    }
+
     // Terrain worker
     terrainWorker = new Worker('worker.js');
     terrainWorker.onmessage = function(e) {
@@ -748,6 +764,61 @@ toolFileInput.addEventListener('change', async (e) => {
     }
 });
 
+// Single-threaded WASM toolpath generation
+async function generateToolpathSingle(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep) {
+    const startTime = performance.now();
+    console.log('🔨 [WASM Single] Starting toolpath generation...');
+
+    return new Promise((resolve, reject) => {
+        const worker = new Worker('worker-parallel.js');
+
+        worker.onmessage = function(e) {
+            const { type, data } = e.data;
+
+            if (type === 'wasm-ready') {
+                // Worker ready, generate full toolpath (0 to end)
+                worker.postMessage({
+                    type: 'generate-toolpath-partial',
+                    data: {
+                        terrainPoints,
+                        toolPoints,
+                        xStep,
+                        yStep,
+                        oobZ,
+                        gridStep,
+                        startScanline: 0,
+                        endScanline: 999999 // Large number to get all scanlines
+                    }
+                });
+            } else if (type === 'toolpath-partial-complete') {
+                const endTime = performance.now();
+                const totalTime = endTime - startTime;
+
+                console.log(`🔨 [WASM Single] ✅ Complete in ${totalTime.toFixed(1)}ms`);
+
+                worker.terminate();
+
+                resolve({
+                    pathData: data.pathData,
+                    numScanlines: data.numScanlines,
+                    pointsPerLine: data.pointsPerLine,
+                    generationTime: totalTime
+                });
+            } else if (type === 'error') {
+                console.error('[WASM Single] Error:', data);
+                worker.terminate();
+                reject(new Error(data.message || 'Worker error'));
+            }
+        };
+
+        worker.onerror = function(error) {
+            console.error('[WASM Single] Worker error:', error);
+            worker.terminate();
+            reject(error);
+        };
+    });
+}
+
 // Parallel toolpath generation coordinator
 async function generateToolpathParallel(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep) {
     const startTime = performance.now();
@@ -898,8 +969,9 @@ generateToolpathBtn.addEventListener('click', async () => {
         return;
     }
 
-    console.log('🎯 Starting parallel toolpath generation...');
-    updateStatus('Generating toolpath (parallel)...');
+    const backend = backendSelect.value;
+    console.log(`🎯 Starting toolpath generation (${backend})...`);
+    updateStatus(`Generating toolpath (${backend})...`);
 
     // Disable button during processing
     generateToolpathBtn.disabled = true;
@@ -911,19 +983,50 @@ generateToolpathBtn.addEventListener('click', async () => {
 
         console.log('Parameters: X step:', xStep, 'Y step:', yStep, 'Z floor:', zFloor, 'Grid step:', STEP_SIZE);
 
-        // Generate toolpath using parallel workers
-        const result = await generateToolpathParallel(
-            terrainData.positions,
-            toolData.positions,
-            xStep,
-            yStep,
-            zFloor,
-            STEP_SIZE
-        );
+        let result;
+
+        // Select backend
+        switch (backend) {
+            case 'webgpu':
+                result = await generateToolpathWebGPU(
+                    terrainData.positions,
+                    toolData.positions,
+                    xStep,
+                    yStep,
+                    zFloor,
+                    STEP_SIZE
+                );
+                break;
+
+            case 'workers':
+                result = await generateToolpathParallel(
+                    terrainData.positions,
+                    toolData.positions,
+                    xStep,
+                    yStep,
+                    zFloor,
+                    STEP_SIZE
+                );
+                break;
+
+            case 'wasm':
+                result = await generateToolpathSingle(
+                    terrainData.positions,
+                    toolData.positions,
+                    xStep,
+                    yStep,
+                    zFloor,
+                    STEP_SIZE
+                );
+                break;
+
+            default:
+                throw new Error('Unknown backend: ' + backend);
+        }
 
         // Display result
         displayToolpath(result);
-        updateStatus('Toolpath complete');
+        updateStatus(`Toolpath complete (${backend})`);
         generateToolpathBtn.disabled = false;
 
         // Store timing
