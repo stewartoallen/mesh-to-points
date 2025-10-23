@@ -38,46 +38,54 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    // Calculate terrain position for this output point
-    let terrain_x = i32(point_idx * uniforms.x_step);
-    let terrain_y = i32(scanline * uniforms.y_step);
+    // Calculate terrain position for this output point (tool center)
+    let tool_center_x = i32(point_idx * uniforms.x_step);
+    let tool_center_y = i32(scanline * uniforms.y_step);
 
-    // Find maximum tool height (highest collision point)
-    var max_z = uniforms.oob_z;
+    // Find minimum delta (most negative = deepest collision)
+    var min_delta = 3.402823466e+38; // FLT_MAX
 
     // Iterate through all sparse tool points
     for (var i = 0u; i < uniforms.tool_count; i++) {
         let tool_point = sparse_tool[i];
 
-        // Calculate terrain lookup position
-        let tx = terrain_x + tool_point.x_offset;
-        let ty = terrain_y + tool_point.y_offset;
+        // Calculate terrain lookup position for this tool point
+        let terrain_x = tool_center_x + tool_point.x_offset;
+        let terrain_y = tool_center_y + tool_point.y_offset;
 
         // Bounds check
-        if (tx < 0 || ty < 0 ||
-            tx >= i32(uniforms.terrain_width) ||
-            ty >= i32(uniforms.terrain_height)) {
+        if (terrain_x < 0 || terrain_y < 0 ||
+            terrain_x >= i32(uniforms.terrain_width) ||
+            terrain_y >= i32(uniforms.terrain_height)) {
+            // Out of bounds - skip this tool point
             continue;
         }
 
         // Get terrain height at this position
-        let terrain_idx = u32(ty) * uniforms.terrain_width + u32(tx);
+        let terrain_idx = u32(terrain_y) * uniforms.terrain_width + u32(terrain_x);
         let terrain_z = terrain_map[terrain_idx];
 
         // Check if it's a valid cell (not NaN)
         // In WGSL, NaN != NaN, so we can use this to detect NaN
         if (terrain_z == terrain_z) {
-            // Calculate tool center height needed to touch this terrain point
-            let tool_center_z = terrain_z - tool_point.z_value;
+            // Calculate delta between tool point Z and terrain Z
+            let delta = tool_point.z_value - terrain_z;
 
-            // Track maximum (highest collision)
-            max_z = max(max_z, tool_center_z);
+            // Track minimum (most negative = highest required tool lift)
+            min_delta = min(min_delta, delta);
         }
+    }
+
+    // Calculate output Z
+    var output_z = uniforms.oob_z;
+    if (min_delta < 3.402823466e+38) {
+        // Valid collision found, return tool center Z position
+        output_z = -min_delta;
     }
 
     // Write result to output
     let output_idx = scanline * uniforms.points_per_line + point_idx;
-    output_path[output_idx] = max_z;
+    output_path[output_idx] = output_z;
 }
 `;
 
@@ -153,7 +161,15 @@ function heightMapToArray(points, pointCount, gridStep) {
 
 // Convert tool points to sparse format for GPU
 function createSparseTool(points, pointCount, gridStep) {
-    // Find bounds
+    // STEP 1: Find the tool tip (minimum Z)
+    let toolTipZ = Infinity;
+    for (let i = 0; i < pointCount; i++) {
+        const z = points[i * 3 + 2];
+        if (z < toolTipZ) toolTipZ = z;
+    }
+    console.log(`🔧 [WebGPU] Tool tip Z: ${toolTipZ.toFixed(3)} (normalizing all tool Z values relative to tip)`);
+
+    // STEP 2: Find bounds
     let minX = Infinity, maxX = -Infinity;
     let minY = Infinity, maxY = -Infinity;
 
@@ -172,7 +188,7 @@ function createSparseTool(points, pointCount, gridStep) {
     const centerX = Math.floor(width / 2);
     const centerY = Math.floor(height / 2);
 
-    // Create temporary grid to collect tool points
+    // STEP 3: Create temporary grid to collect tool points (Z relative to tip)
     const tempGrid = new Map();
 
     for (let i = 0; i < pointCount; i++) {
@@ -186,8 +202,10 @@ function createSparseTool(points, pointCount, gridStep) {
         if (gx >= 0 && gx < width && gy >= 0 && gy < height) {
             const key = `${gx},${gy}`;
             // Keep maximum Z if multiple points map to same cell
-            if (!tempGrid.has(key) || z > tempGrid.get(key)) {
-                tempGrid.set(key, z);
+            // Store Z relative to tool tip (this is the key fix!)
+            const relativeZ = z - toolTipZ;
+            if (!tempGrid.has(key) || relativeZ > tempGrid.get(key)) {
+                tempGrid.set(key, relativeZ);
             }
         }
     }
@@ -239,6 +257,15 @@ export async function generateToolpathWebGPU(terrainPoints, toolPoints, xStep, y
     const sparsityRatio = ((1 - toolData.count / toolDenseSize) * 100).toFixed(1);
     console.log(`🎮 [WebGPU] Sparsity: ${toolData.count} vs ${toolDenseSize} dense (${sparsityRatio}% sparse)`);
 
+    // Debug: Show sample tool values
+    console.log(`🎮 [WebGPU] Sample tool data (first 3 points):`);
+    for (let i = 0; i < Math.min(3, toolData.count); i++) {
+        const xOff = toolData.data[i * 3 + 0];
+        const yOff = toolData.data[i * 3 + 1];
+        const zVal = toolData.data[i * 3 + 2];
+        console.log(`  Point ${i}: offset=(${xOff}, ${yOff}), z=${zVal.toFixed(3)}`);
+    }
+
     // Calculate output dimensions
     const pointsPerLine = Math.ceil(terrainData.width / xStep);
     const numScanlines = Math.ceil(terrainData.height / yStep);
@@ -257,14 +284,17 @@ export async function generateToolpathWebGPU(terrainPoints, toolPoints, xStep, y
     device.queue.writeBuffer(terrainBuffer, 0, terrainData.grid);
 
     // Sparse tool buffer - need to convert to proper struct format
-    // GPU expects struct { i32 x_offset, i32 y_offset, f32 z_value } but with 16-byte alignment
-    // So we'll use a 4-element array per point: [x_offset, y_offset, z_value, padding]
-    const toolBufferData = new Float32Array(toolData.count * 4);
+    // GPU expects struct { i32 x_offset, i32 y_offset, f32 z_value } with 16-byte alignment
+    // We need to pack as: [i32 x_offset, i32 y_offset, f32 z_value, f32 padding]
+    const toolBufferData = new ArrayBuffer(toolData.count * 16); // 16 bytes per struct
+    const toolBufferI32 = new Int32Array(toolBufferData);
+    const toolBufferF32 = new Float32Array(toolBufferData);
+
     for (let i = 0; i < toolData.count; i++) {
-        toolBufferData[i * 4 + 0] = toolData.data[i * 3 + 0]; // x_offset (as float, cast to i32 in shader)
-        toolBufferData[i * 4 + 1] = toolData.data[i * 3 + 1]; // y_offset (as float, cast to i32 in shader)
-        toolBufferData[i * 4 + 2] = toolData.data[i * 3 + 2]; // z_value
-        toolBufferData[i * 4 + 3] = 0; // padding
+        toolBufferI32[i * 4 + 0] = Math.round(toolData.data[i * 3 + 0]); // x_offset as i32
+        toolBufferI32[i * 4 + 1] = Math.round(toolData.data[i * 3 + 1]); // y_offset as i32
+        toolBufferF32[i * 4 + 2] = toolData.data[i * 3 + 2]; // z_value as f32
+        toolBufferF32[i * 4 + 3] = 0; // padding
     }
 
     const toolBuffer = device.createBuffer({
@@ -376,6 +406,16 @@ export async function generateToolpathWebGPU(terrainPoints, toolPoints, xStep, y
     const totalTime = endTime - startTime;
 
     console.log(`🎮 [WebGPU] ✅ Complete in ${totalTime.toFixed(1)}ms`);
+
+    // Debug: Show sample output values
+    console.log(`🎮 [WebGPU] Sample output (first 5 points):`);
+    for (let i = 0; i < Math.min(5, result.length); i++) {
+        console.log(`  Point ${i}: z=${result[i].toFixed(3)}`);
+    }
+    console.log(`🎮 [WebGPU] Sample output (last 5 points):`);
+    for (let i = Math.max(0, result.length - 5); i < result.length; i++) {
+        console.log(`  Point ${i}: z=${result[i].toFixed(3)}`);
+    }
 
     return {
         pathData: result,
