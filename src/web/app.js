@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { initWebGPU, generateToolpathWebGPU } from './toolpath-webgpu.js?v=4';
+import { initWebGPU, generateToolpathWebGPU } from './toolpath-webgpu.js?v=6';
 
 // Configuration
 let STEP_SIZE = 0.1; // mm (default, can be changed via dropdown)
@@ -1010,12 +1010,37 @@ generateToolpathBtn.addEventListener('click', async () => {
                 console.log('🔍 Comparing WebGPU vs WASM outputs...');
                 let maxDiff = 0;
                 let mismatches = 0;
+                let firstMismatch = -1;
                 for (let i = 0; i < Math.min(result.pathData.length, wasmResult.pathData.length); i++) {
                     const diff = Math.abs(result.pathData[i] - wasmResult.pathData[i]);
                     if (diff > maxDiff) maxDiff = diff;
-                    if (diff > 0.001) mismatches++;
+                    if (diff > 0.001) {
+                        if (firstMismatch < 0) firstMismatch = i;
+                        mismatches++;
+                    }
                 }
                 console.log(`🔍 Max diff: ${maxDiff.toFixed(6)}, Mismatches: ${mismatches}/${result.pathData.length}`);
+                if (firstMismatch >= 0) {
+                    const scanline = Math.floor(firstMismatch / result.pointsPerLine);
+                    const point = firstMismatch % result.pointsPerLine;
+                    console.log(`🔍 First mismatch at index ${firstMismatch} (scanline ${scanline}, point ${point}):`);
+                    console.log(`  WebGPU: ${result.pathData[firstMismatch].toFixed(3)}`);
+                    console.log(`  WASM: ${wasmResult.pathData[firstMismatch].toFixed(3)}`);
+                    console.log(`  Diff: ${Math.abs(result.pathData[firstMismatch] - wasmResult.pathData[firstMismatch]).toFixed(3)}`);
+
+                    // Show a few more examples
+                    console.log(`🔍 Sample mismatches:`);
+                    let samples = 0;
+                    for (let i = 0; i < result.pathData.length && samples < 5; i++) {
+                        const diff = Math.abs(result.pathData[i] - wasmResult.pathData[i]);
+                        if (diff > 0.001) {
+                            const sl = Math.floor(i / result.pointsPerLine);
+                            const pt = i % result.pointsPerLine;
+                            console.log(`  [${i}] (${sl},${pt}): GPU=${result.pathData[i].toFixed(3)} WASM=${wasmResult.pathData[i].toFixed(3)} diff=${diff.toFixed(3)}`);
+                            samples++;
+                        }
+                    }
+                }
                 if (mismatches === 0) {
                     console.log('✅ WebGPU output matches WASM exactly!');
                 } else {

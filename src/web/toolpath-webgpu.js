@@ -147,13 +147,15 @@ function heightMapToArray(points, pointCount, gridStep) {
         const gx = Math.round((x - minX) / gridStep);
         const gy = Math.round((y - minY) / gridStep);
 
-        if (gx >= 0 && gx < width && gy >= 0 && gy < height) {
-            const idx = gy * width + gx;
-            // Keep maximum Z if multiple points map to same cell
-            if (isNaN(grid[idx]) || z > grid[idx]) {
-                grid[idx] = z;
-            }
-        }
+        // Clamp to grid bounds (match C behavior)
+        if (gx < 0) gx = 0;
+        if (gx >= width) gx = width - 1;
+        if (gy < 0) gy = 0;
+        if (gy >= height) gy = height - 1;
+
+        const idx = gy * width + gx;
+        // Overwrite with latest value (match C behavior - no max, just assign)
+        grid[idx] = z;
     }
 
     return { grid, width, height };
@@ -199,15 +201,17 @@ function createSparseTool(points, pointCount, gridStep) {
         const gx = Math.round((x - minX) / gridStep);
         const gy = Math.round((y - minY) / gridStep);
 
-        if (gx >= 0 && gx < width && gy >= 0 && gy < height) {
-            const key = `${gx},${gy}`;
-            // Keep maximum Z if multiple points map to same cell
-            // Store Z relative to tool tip (this is the key fix!)
-            const relativeZ = z - toolTipZ;
-            if (!tempGrid.has(key) || relativeZ > tempGrid.get(key)) {
-                tempGrid.set(key, relativeZ);
-            }
-        }
+        // Clamp to grid bounds (match C behavior)
+        if (gx < 0) gx = 0;
+        if (gx >= width) gx = width - 1;
+        if (gy < 0) gy = 0;
+        if (gy >= height) gy = height - 1;
+
+        const key = `${gx},${gy}`;
+        // Overwrite with latest value (match C behavior)
+        // Store Z relative to tool tip
+        const relativeZ = z - toolTipZ;
+        tempGrid.set(key, relativeZ);
     }
 
     // Convert to sparse format: array of structs (x_offset, y_offset, z_value)
@@ -291,10 +295,19 @@ export async function generateToolpathWebGPU(terrainPoints, toolPoints, xStep, y
     const toolBufferF32 = new Float32Array(toolBufferData);
 
     for (let i = 0; i < toolData.count; i++) {
-        toolBufferI32[i * 4 + 0] = Math.round(toolData.data[i * 3 + 0]); // x_offset as i32
-        toolBufferI32[i * 4 + 1] = Math.round(toolData.data[i * 3 + 1]); // y_offset as i32
-        toolBufferF32[i * 4 + 2] = toolData.data[i * 3 + 2]; // z_value as f32
+        const xOff = Math.round(toolData.data[i * 3 + 0]);
+        const yOff = Math.round(toolData.data[i * 3 + 1]);
+        const zVal = toolData.data[i * 3 + 2];
+
+        toolBufferI32[i * 4 + 0] = xOff; // x_offset as i32
+        toolBufferI32[i * 4 + 1] = yOff; // y_offset as i32
+        toolBufferF32[i * 4 + 2] = zVal; // z_value as f32
         toolBufferF32[i * 4 + 3] = 0; // padding
+
+        // Debug first few
+        if (i < 3) {
+            console.log(`🔧 [WebGPU] Tool point ${i}: offset=(${xOff}, ${yOff}), z=${zVal.toFixed(3)}`);
+        }
     }
 
     const toolBuffer = device.createBuffer({
@@ -408,14 +421,22 @@ export async function generateToolpathWebGPU(terrainPoints, toolPoints, xStep, y
     console.log(`🎮 [WebGPU] ✅ Complete in ${totalTime.toFixed(1)}ms`);
 
     // Debug: Show sample output values
-    console.log(`🎮 [WebGPU] Sample output (first 5 points):`);
-    for (let i = 0; i < Math.min(5, result.length); i++) {
+    console.log(`🎮 [WebGPU] Sample output (first 10 points):`);
+    for (let i = 0; i < Math.min(10, result.length); i++) {
         console.log(`  Point ${i}: z=${result[i].toFixed(3)}`);
     }
-    console.log(`🎮 [WebGPU] Sample output (last 5 points):`);
-    for (let i = Math.max(0, result.length - 5); i < result.length; i++) {
+    console.log(`🎮 [WebGPU] Sample output (middle 5 points):`);
+    const midStart = Math.floor(result.length / 2) - 2;
+    for (let i = midStart; i < midStart + 5; i++) {
         console.log(`  Point ${i}: z=${result[i].toFixed(3)}`);
     }
+
+    // Count how many non-OOB points we have
+    let validPoints = 0;
+    for (let i = 0; i < result.length; i++) {
+        if (result[i] !== oobZ) validPoints++;
+    }
+    console.log(`🎮 [WebGPU] Valid points: ${validPoints}/${result.length} (${(validPoints/result.length*100).toFixed(1)}%)`)
 
     return {
         pathData: result,
