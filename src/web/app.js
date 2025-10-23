@@ -1,8 +1,5 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { initWebGPU, generateToolpathWebGPU } from './toolpath-webgpu.js?v=7';
-import { generateToolpathWebGPUv2 } from './toolpath-webgpu-v2.js?v=1';
-import { initWebGPURasterizer, rasterizeMeshWebGPU } from './webgpu-rasterize.js?v=1';
 import { parseSTL } from './parse-stl.js?v=1';
 
 // Configuration
@@ -52,6 +49,7 @@ let toolpathWorker = null;
 let terrainData = null;
 let toolData = null;
 let toolFile = null;
+let webgpuWorker = null;
 
 // Timing data
 let timingData = {
@@ -190,18 +188,16 @@ function initScene() {
                             const { positions, triangleCount } = parseSTL(buffer);
                             console.log('Parsed tool STL:', triangleCount, 'triangles');
 
-                            const startTime = performance.now();
-                            const result = await rasterizeMeshWebGPU(positions, STEP_SIZE, 1); // 1 = DOWNWARD_FACING
-                            const endTime = performance.now();
-
-                            console.log('WebGPU tool rasterization complete:', result.pointCount, 'points in', (endTime - startTime).toFixed(1), 'ms');
-
-                            timingData.toolConversion = endTime - startTime;
-                            updateTimingPanel();
-
-                            toolData = result;
-                            displayTool(result);
-                            updateStatus('Recompute complete');
+                            // Send to WebGPU worker
+                            webgpuWorker.postMessage({
+                                type: 'rasterize',
+                                data: {
+                                    triangles: positions,
+                                    stepSize: STEP_SIZE,
+                                    filterMode: 1, // 1 = DOWNWARD_FACING
+                                    isForTool: true
+                                }
+                            }, [positions.buffer]);
                         } catch (error) {
                             console.error('Error recomputing tool:', error);
                             updateStatus('Error: ' + error.message);
@@ -265,23 +261,31 @@ const NUM_PARALLEL_WORKERS = 4; // Number of parallel workers for toolpath gener
 
 // Web Worker setup
 async function initWorkers() {
-    // Initialize WebGPU for toolpath
-    const webgpuAvailable = await initWebGPU();
+    // Initialize WebGPU worker
+    webgpuWorker = new Worker('webgpu-worker.js');
+
+    const webgpuReady = new Promise((resolve) => {
+        webgpuWorker.onmessage = function(e) {
+            if (e.data.type === 'webgpu-ready') {
+                resolve(e.data.success);
+            }
+        };
+    });
+
+    // Send init message
+    webgpuWorker.postMessage({ type: 'init' });
+
+    // Wait for WebGPU to initialize
+    const webgpuAvailable = await webgpuReady;
+
     if (!webgpuAvailable) {
         console.warn('⚠️ WebGPU not available, disabling option');
-        // Disable WebGPU option in dropdown
+        // Disable WebGPU options
         const webgpuOption = backendSelect.querySelector('option[value="webgpu"]');
         if (webgpuOption) {
             webgpuOption.disabled = true;
             webgpuOption.text += ' (not available)';
         }
-    }
-
-    // Initialize WebGPU rasterizer
-    const rasterizerAvailable = await initWebGPURasterizer();
-    if (!rasterizerAvailable) {
-        console.warn('⚠️ WebGPU rasterizer not available, disabling option');
-        // Disable WebGPU conversion option
         const conversionWebGPUOption = conversionMethodSelect.querySelector('option[value="webgpu"]');
         if (conversionWebGPUOption) {
             conversionWebGPUOption.disabled = true;
@@ -289,9 +293,40 @@ async function initWorkers() {
         }
         // Default to WASM
         conversionMethodSelect.value = 'wasm';
-        // Default to workers
         backendSelect.value = 'workers';
     }
+
+    // Set up WebGPU worker message handler
+    webgpuWorker.onmessage = function(e) {
+        const { type, data, success, isForTool } = e.data;
+
+        switch (type) {
+            case 'webgpu-ready':
+                // Already handled above
+                break;
+
+            case 'rasterize-complete':
+                console.log('WebGPU worker: rasterization complete, points:', data.pointCount, 'isForTool:', isForTool);
+                handleRasterizeComplete(data, isForTool);
+                break;
+
+            case 'toolpath-complete':
+                console.log('WebGPU worker: toolpath complete');
+                handleToolpathComplete(data);
+                break;
+
+            case 'error':
+                console.error('WebGPU worker error:', e.data.message);
+                updateStatus('Error: ' + e.data.message);
+                generateToolpathBtn.disabled = false;
+                break;
+        }
+    };
+
+    webgpuWorker.onerror = function(error) {
+        console.error('WebGPU worker error:', error);
+        updateStatus('WebGPU worker error');
+    };
 
     // Terrain worker
     terrainWorker = new Worker('worker.js');
@@ -413,6 +448,78 @@ function createFileList(file) {
 // Update status display
 function updateStatus(status) {
     statusEl.textContent = status;
+}
+
+// Handle rasterization complete from WebGPU worker
+function handleRasterizeComplete(data, isForTool) {
+    console.log('handleRasterizeComplete:', {
+        isForTool: isForTool,
+        pointCount: data.pointCount,
+        bounds: data.bounds,
+        conversionTime: data.conversionTime,
+        positionsLength: data.positions?.length
+    });
+
+    // Verify data integrity on main thread
+    if (data.positions && data.positions.length > 0) {
+        const firstPoint = `(${data.positions[0].toFixed(3)}, ${data.positions[1].toFixed(3)}, ${data.positions[2].toFixed(3)})`;
+        const lastIdx = data.positions.length - 3;
+        const lastPoint = `(${data.positions[lastIdx].toFixed(3)}, ${data.positions[lastIdx+1].toFixed(3)}, ${data.positions[lastIdx+2].toFixed(3)})`;
+        console.log(`[Main Thread] Received first point: ${firstPoint}, last point: ${lastPoint}`);
+
+        // Check for NaN or Infinity
+        let hasInvalid = false;
+        for (let i = 0; i < Math.min(data.positions.length, 100); i++) {
+            if (!isFinite(data.positions[i])) {
+                hasInvalid = true;
+                console.error(`[Main Thread] Invalid value at index ${i}: ${data.positions[i]}`);
+                break;
+            }
+        }
+        if (!hasInvalid) {
+            console.log(`[Main Thread] Data integrity check passed`);
+        }
+    }
+
+    // Determine if this is terrain or tool based on parameter
+    if (isForTool) {
+        toolData = data;
+        displayTool(data);
+        updateStatus('Tool complete');
+
+        // Store timing
+        if (data.conversionTime !== undefined) {
+            timingData.toolConversion = data.conversionTime;
+            updateTimingPanel();
+        }
+
+        // Enable generate button
+        generateToolpathBtn.disabled = false;
+    } else {
+        terrainData = data;
+        displayPointCloud(data);
+        updateStatus('Terrain complete');
+
+        // Store timing
+        if (data.conversionTime !== undefined) {
+            timingData.terrainConversion = data.conversionTime;
+            updateTimingPanel();
+        }
+    }
+}
+
+// Handle toolpath complete from WebGPU worker
+function handleToolpathComplete(data) {
+    displayToolpath(data);
+    updateStatus('Toolpath complete (webgpu)');
+    generateToolpathBtn.disabled = false;
+
+    // Store timing
+    timingData.toolpathGeneration = data.generationTime;
+    updateTimingPanel();
+
+    // Enable clear button
+    clearToolpathBtn.disabled = false;
 }
 
 // Display point cloud in scene
@@ -810,20 +917,17 @@ async function processFileWebGPU(file) {
         console.log('Parsed STL:', triangleCount, 'triangles');
 
         updateStatus('Rasterizing with WebGPU...');
-        const startTime = performance.now();
-        const result = await rasterizeMeshWebGPU(positions, STEP_SIZE, 0); // 0 = UPWARD_FACING for terrain
-        const endTime = performance.now();
 
-        console.log('WebGPU rasterization complete:', result.pointCount, 'points in', (endTime - startTime).toFixed(1), 'ms');
-
-        // Store timing
-        timingData.terrainConversion = endTime - startTime;
-        updateTimingPanel();
-
-        // Store and display result
-        terrainData = result;
-        displayPointCloud(result);
-        updateStatus('Terrain complete');
+        // Send to WebGPU worker
+        webgpuWorker.postMessage({
+            type: 'rasterize',
+            data: {
+                triangles: positions,
+                stepSize: STEP_SIZE,
+                filterMode: 0, // 0 = UPWARD_FACING for terrain
+                isForTool: false
+            }
+        }, [positions.buffer]);
     } catch (error) {
         console.error('Error processing file with WebGPU:', error);
         updateStatus('Error: ' + error.message);
@@ -931,28 +1035,21 @@ toolFileInput.addEventListener('change', async (e) => {
 
             try {
                 if (conversionMethod === 'webgpu') {
-                    // WebGPU path
+                    // WebGPU worker path
                     const buffer = await file.arrayBuffer();
                     const { positions, triangleCount } = parseSTL(buffer);
                     console.log('Parsed tool STL:', triangleCount, 'triangles');
 
-                    const startTime = performance.now();
-                    const result = await rasterizeMeshWebGPU(positions, STEP_SIZE, 1); // 1 = DOWNWARD_FACING for tool
-                    const endTime = performance.now();
-
-                    console.log('WebGPU tool rasterization complete:', result.pointCount, 'points in', (endTime - startTime).toFixed(1), 'ms');
-
-                    // Store timing
-                    timingData.toolConversion = endTime - startTime;
-                    updateTimingPanel();
-
-                    // Store and display result
-                    toolData = result;
-                    displayTool(result);
-                    updateStatus('Tool complete');
-
-                    // Enable generate button
-                    generateToolpathBtn.disabled = false;
+                    // Send to WebGPU worker
+                    webgpuWorker.postMessage({
+                        type: 'rasterize',
+                        data: {
+                            triangles: positions,
+                            stepSize: STEP_SIZE,
+                            filterMode: 1, // 1 = DOWNWARD_FACING for tool
+                            isForTool: true
+                        }
+                    }, [positions.buffer]);
                 } else {
                     // WASM worker path
                     const buffer = await file.arrayBuffer();
@@ -1204,15 +1301,20 @@ generateToolpathBtn.addEventListener('click', async () => {
         // Select backend
         switch (backend) {
             case 'webgpu':
-                result = await generateToolpathWebGPUv2(
-                    terrainData.positions,
-                    toolData.positions,
-                    xStep,
-                    yStep,
-                    zFloor,
-                    STEP_SIZE
-                );
-                break;
+                // Send to WebGPU worker (COPY data, don't transfer - we need to keep it)
+                webgpuWorker.postMessage({
+                    type: 'generate-toolpath',
+                    data: {
+                        terrainPoints: terrainData.positions,
+                        toolPoints: toolData.positions,
+                        xStep,
+                        yStep,
+                        oobZ: zFloor,
+                        gridStep: STEP_SIZE
+                    }
+                });
+                // Result will be handled by the worker message handler
+                return; // Exit early since async
 
             case 'workers':
                 result = await generateToolpathParallel(
