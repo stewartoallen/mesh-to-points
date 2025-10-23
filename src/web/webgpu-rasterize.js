@@ -55,12 +55,17 @@ struct Uniforms {
     grid_height: u32,
     triangle_count: u32,
     filter_mode: u32,  // 0 = UPWARD (terrain, keep highest), 1 = DOWNWARD (tool, keep lowest)
+    spatial_grid_width: u32,
+    spatial_grid_height: u32,
+    spatial_cell_size: f32,
 }
 
 @group(0) @binding(0) var<storage, read> triangles: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output_points: array<f32>;
 @group(0) @binding(2) var<storage, read_write> valid_mask: array<u32>;
 @group(0) @binding(3) var<uniform> uniforms: Uniforms;
+@group(0) @binding(4) var<storage, read> spatial_cell_offsets: array<u32>;
+@group(0) @binding(5) var<storage, read> spatial_triangle_indices: array<u32>;
 
 // Fast 2D bounding box check for XY plane
 fn ray_hits_triangle_bbox_2d(ray_x: f32, ray_y: f32, v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>) -> bool {
@@ -163,9 +168,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var found = false;
 
-    // Test all triangles
-    for (var i = 0u; i < uniforms.triangle_count; i++) {
-        let tri_base = i * 9u;
+    // Find which spatial grid cell this ray belongs to
+    let spatial_cell_x = u32((world_x - uniforms.bounds_min_x) / uniforms.spatial_cell_size);
+    let spatial_cell_y = u32((world_y - uniforms.bounds_min_y) / uniforms.spatial_cell_size);
+
+    // Clamp to spatial grid bounds
+    let clamped_cx = min(spatial_cell_x, uniforms.spatial_grid_width - 1u);
+    let clamped_cy = min(spatial_cell_y, uniforms.spatial_grid_height - 1u);
+
+    let spatial_cell_idx = clamped_cy * uniforms.spatial_grid_width + clamped_cx;
+
+    // Get triangle range for this cell
+    let start_idx = spatial_cell_offsets[spatial_cell_idx];
+    let end_idx = spatial_cell_offsets[spatial_cell_idx + 1u];
+
+    // Test only triangles in this spatial cell
+    for (var idx = start_idx; idx < end_idx; idx++) {
+        let tri_idx = spatial_triangle_indices[idx];
+        let tri_base = tri_idx * 9u;
+
         let v0 = vec3<f32>(
             triangles[tri_base],
             triangles[tri_base + 1u],
@@ -241,16 +262,103 @@ function calculateBounds(triangles) {
     };
 }
 
+// Build spatial grid in JavaScript for efficient triangle culling
+function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
+    const gridWidth = Math.ceil((bounds.max.x - bounds.min.x) / cellSize);
+    const gridHeight = Math.ceil((bounds.max.y - bounds.min.y) / cellSize);
+    const totalCells = gridWidth * gridHeight;
+
+    console.log(`🎮 [Spatial Grid] Building ${gridWidth}x${gridHeight} grid (${cellSize}mm cells)`);
+
+    // Create grid cells (each cell contains list of triangle indices)
+    const grid = new Array(totalCells);
+    for (let i = 0; i < totalCells; i++) {
+        grid[i] = [];
+    }
+
+    // Insert each triangle into overlapping cells
+    const triangleCount = triangles.length / 9;
+    for (let t = 0; t < triangleCount; t++) {
+        const base = t * 9;
+
+        // Get triangle vertices
+        const v0x = triangles[base], v0y = triangles[base + 1];
+        const v1x = triangles[base + 3], v1y = triangles[base + 4];
+        const v2x = triangles[base + 6], v2y = triangles[base + 7];
+
+        // Calculate triangle 2D bounding box
+        const minX = Math.min(v0x, v1x, v2x);
+        const maxX = Math.max(v0x, v1x, v2x);
+        const minY = Math.min(v0y, v1y, v2y);
+        const maxY = Math.max(v0y, v1y, v2y);
+
+        // Find overlapping cells
+        let minCellX = Math.floor((minX - bounds.min.x) / cellSize);
+        let maxCellX = Math.floor((maxX - bounds.min.x) / cellSize);
+        let minCellY = Math.floor((minY - bounds.min.y) / cellSize);
+        let maxCellY = Math.floor((maxY - bounds.min.y) / cellSize);
+
+        // Clamp to grid bounds
+        minCellX = Math.max(0, Math.min(gridWidth - 1, minCellX));
+        maxCellX = Math.max(0, Math.min(gridWidth - 1, maxCellX));
+        minCellY = Math.max(0, Math.min(gridHeight - 1, minCellY));
+        maxCellY = Math.max(0, Math.min(gridHeight - 1, maxCellY));
+
+        // Add triangle to all overlapping cells
+        for (let cy = minCellY; cy <= maxCellY; cy++) {
+            for (let cx = minCellX; cx <= maxCellX; cx++) {
+                const cellIdx = cy * gridWidth + cx;
+                grid[cellIdx].push(t);
+            }
+        }
+    }
+
+    // Flatten grid to GPU-friendly format
+    // Format: [cell_start_offsets (gridWidth*gridHeight), triangle_indices (flattened)]
+    let totalTriangleRefs = 0;
+    for (let i = 0; i < totalCells; i++) {
+        totalTriangleRefs += grid[i].length;
+    }
+
+    const cellOffsets = new Uint32Array(totalCells + 1); // +1 for end sentinel
+    const triangleIndices = new Uint32Array(totalTriangleRefs);
+
+    let currentOffset = 0;
+    for (let i = 0; i < totalCells; i++) {
+        cellOffsets[i] = currentOffset;
+        for (let j = 0; j < grid[i].length; j++) {
+            triangleIndices[currentOffset++] = grid[i][j];
+        }
+    }
+    cellOffsets[totalCells] = currentOffset; // Sentinel for last cell
+
+    // Calculate average triangles per cell
+    const avgPerCell = totalTriangleRefs / totalCells;
+    console.log(`🎮 [Spatial Grid] ${totalTriangleRefs} triangle refs (avg ${avgPerCell.toFixed(1)} per cell)`);
+
+    return {
+        gridWidth,
+        gridHeight,
+        cellSize,
+        cellOffsets,
+        triangleIndices,
+        avgTrianglesPerCell: avgPerCell
+    };
+}
+
 // Main rasterization function
 // filterMode: 0 = UPWARD_FACING (terrain, keep highest), 1 = DOWNWARD_FACING (tool, keep lowest)
 export async function rasterizeMeshWebGPU(triangles, stepSize, filterMode = 0) {
     const startTime = performance.now();
 
     if (!isInitialized) {
+        const initStart = performance.now();
         const success = await initWebGPURasterizer();
         if (!success) {
             throw new Error('WebGPU not available');
         }
+        const initEnd = performance.now();
+        console.log(`🎮 [WebGPU Rasterize] ⏱️  First-time init: ${(initEnd - initStart).toFixed(1)}ms`);
     }
 
     console.log(`🎮 [WebGPU Rasterize] Starting (${triangles.length / 9} triangles, step ${stepSize}mm, mode ${filterMode})...`);
@@ -264,10 +372,18 @@ export async function rasterizeMeshWebGPU(triangles, stepSize, filterMode = 0) {
     const gridWidth = Math.ceil((bounds.max.x - bounds.min.x) / stepSize) + 1;
     const gridHeight = Math.ceil((bounds.max.y - bounds.min.y) / stepSize) + 1;
     const totalGridPoints = gridWidth * gridHeight;
+    const triangleCount = triangles.length / 9;
+    const totalRayTriangleTests = totalGridPoints * triangleCount;
 
-    console.log(`🎮 [WebGPU Rasterize] Grid: ${gridWidth}x${gridHeight} = ${totalGridPoints} points`);
+    console.log(`🎮 [WebGPU Rasterize] Grid: ${gridWidth}x${gridHeight} = ${totalGridPoints.toLocaleString()} points`);
     const t1 = performance.now();
     console.log(`🎮 [WebGPU Rasterize] ⏱️  Bounds calc: ${(t1 - t0).toFixed(1)}ms`);
+
+    // Build spatial grid for acceleration
+    const spatialGrid = buildSpatialGrid(triangles, bounds);
+    const t1_5 = performance.now();
+    console.log(`🎮 [WebGPU Rasterize] ⏱️  Spatial grid build: ${(t1_5 - t1).toFixed(1)}ms`);
+    console.log(`🎮 [WebGPU Rasterize] Optimized ray-tri tests: ~${(totalGridPoints * spatialGrid.avgTrianglesPerCell).toLocaleString()} (avg ${spatialGrid.avgTrianglesPerCell.toFixed(1)} per ray)`);
 
     // Create buffers
     const triangleBuffer = device.createBuffer({
@@ -287,7 +403,20 @@ export async function rasterizeMeshWebGPU(triangles, stepSize, filterMode = 0) {
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
 
-    // Uniforms
+    // Spatial grid buffers
+    const spatialCellOffsetsBuffer = device.createBuffer({
+        size: spatialGrid.cellOffsets.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(spatialCellOffsetsBuffer, 0, spatialGrid.cellOffsets);
+
+    const spatialTriangleIndicesBuffer = device.createBuffer({
+        size: spatialGrid.triangleIndices.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(spatialTriangleIndicesBuffer, 0, spatialGrid.triangleIndices);
+
+    // Uniforms (extended for spatial grid)
     const uniformData = new Float32Array([
         bounds.min.x,
         bounds.min.y,
@@ -296,13 +425,18 @@ export async function rasterizeMeshWebGPU(triangles, stepSize, filterMode = 0) {
         bounds.max.y,
         bounds.max.z,
         stepSize,
-        0, 0, 0, 0 // padding for alignment
+        0, 0, 0, 0, // grid_width, grid_height, triangle_count, filter_mode
+        0, 0, 0, 0  // spatial_grid_width, spatial_grid_height, spatial_cell_size, padding
     ]);
     const uniformDataU32 = new Uint32Array(uniformData.buffer);
     uniformDataU32[7] = gridWidth;
     uniformDataU32[8] = gridHeight;
     uniformDataU32[9] = triangles.length / 9; // triangle count
     uniformDataU32[10] = filterMode;
+    uniformDataU32[11] = spatialGrid.gridWidth;
+    uniformDataU32[12] = spatialGrid.gridHeight;
+    const uniformDataF32 = new Float32Array(uniformData.buffer);
+    uniformDataF32[13] = spatialGrid.cellSize;
 
     const uniformBuffer = device.createBuffer({
         size: uniformData.byteLength,
@@ -321,6 +455,8 @@ export async function rasterizeMeshWebGPU(triangles, stepSize, filterMode = 0) {
             { binding: 1, resource: { buffer: outputBuffer } },
             { binding: 2, resource: { buffer: validMaskBuffer } },
             { binding: 3, resource: { buffer: uniformBuffer } },
+            { binding: 4, resource: { buffer: spatialCellOffsetsBuffer } },
+            { binding: 5, resource: { buffer: spatialTriangleIndicesBuffer } },
         ],
     });
 
@@ -390,6 +526,8 @@ export async function rasterizeMeshWebGPU(triangles, stepSize, filterMode = 0) {
     outputBuffer.destroy();
     validMaskBuffer.destroy();
     uniformBuffer.destroy();
+    spatialCellOffsetsBuffer.destroy();
+    spatialTriangleIndicesBuffer.destroy();
     stagingOutputBuffer.destroy();
     stagingValidMaskBuffer.destroy();
 
