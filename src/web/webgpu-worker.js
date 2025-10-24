@@ -1313,6 +1313,7 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
     }
 
     // Calculate tool dimensions for overlap
+    // Tool points are [gridX, gridY, Z] where X/Y are grid indices (not mm)
     let toolMinX = Infinity, toolMaxX = -Infinity;
     let toolMinY = Infinity, toolMaxY = -Infinity;
     for (let i = 0; i < toolPoints.length; i += 3) {
@@ -1321,8 +1322,12 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
         toolMinY = Math.min(toolMinY, toolPoints[i + 1]);
         toolMaxY = Math.max(toolMaxY, toolPoints[i + 1]);
     }
-    const toolWidth = toolMaxX - toolMinX;
-    const toolHeight = toolMaxY - toolMinY;
+    // Tool dimensions in grid cells
+    const toolWidthCells = toolMaxX - toolMinX;
+    const toolHeightCells = toolMaxY - toolMinY;
+    // Convert to mm for logging
+    const toolWidthMm = toolWidthCells * gridStep;
+    const toolHeightMm = toolHeightCells * gridStep;
 
     // Check if tiling is needed based on output grid size
     const outputWidth = Math.ceil((terrainBounds.max.x - terrainBounds.min.x) / gridStep) + 1;
@@ -1361,18 +1366,21 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
     }
 
     // Tiling needed
+    const tilingStartTime = performance.now();
     console.log('[WebGPU Worker] 🔲 Using tiled toolpath generation');
     console.log(`[WebGPU Worker] Terrain format: ${isDense ? 'DENSE' : 'SPARSE'} (${terrainPoints.length} ${isDense ? 'cells' : 'points'})`);
-    console.log(`[WebGPU Worker] Tool dimensions: ${toolWidth.toFixed(2)}mm × ${toolHeight.toFixed(2)}mm`);
+    console.log(`[WebGPU Worker] Tool dimensions: ${toolWidthMm.toFixed(2)}mm × ${toolHeightMm.toFixed(2)}mm (${toolWidthCells}×${toolHeightCells} cells)`);
 
-    // Create tiles with tool-size overlap
-    const tiles = createToolpathTiles(terrainBounds, gridStep, xStep, yStep, toolWidth, toolHeight, maxSafeSize);
+    // Create tiles with tool-size overlap (pass dimensions in grid cells)
+    const tiles = createToolpathTiles(terrainBounds, gridStep, xStep, yStep, toolWidthCells, toolHeightCells, maxSafeSize);
     console.log(`[WebGPU Worker] Created ${tiles.length} tiles`);
 
     // Process each tile
     const tileResults = [];
+    let totalTileTime = 0;
     for (let i = 0; i < tiles.length; i++) {
         const tile = tiles[i];
+        const tileStartTime = performance.now();
         console.log(`[WebGPU Worker] Processing tile ${i + 1}/${tiles.length}...`);
 
         // Extract terrain data for this tile
@@ -1440,6 +1448,9 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
             tile.bounds
         );
 
+        const tileTime = performance.now() - tileStartTime;
+        totalTileTime += tileTime;
+
         tileResults.push({
             pathData: tileToolpathResult.pathData,
             numScanlines: tileToolpathResult.numScanlines,
@@ -1447,25 +1458,37 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
             tile: tile
         });
 
-        console.log(`[WebGPU Worker] Tile ${i + 1}/${tiles.length} complete: ${tileToolpathResult.numScanlines}×${tileToolpathResult.pointsPerLine}`);
+        console.log(`[WebGPU Worker] Tile ${i + 1}/${tiles.length} complete: ${tileToolpathResult.numScanlines}×${tileToolpathResult.pointsPerLine} in ${tileTime.toFixed(1)}ms`);
     }
 
+    console.log(`[WebGPU Worker] All tiles processed in ${totalTileTime.toFixed(1)}ms (avg ${(totalTileTime/tiles.length).toFixed(1)}ms per tile)`);
+
     // Stitch tiles together, dropping overlap regions
+    const stitchStartTime = performance.now();
     const stitchedResult = stitchToolpathTiles(tileResults, terrainBounds, gridStep, xStep, yStep);
-    console.log(`[WebGPU Worker] ✅ Tiled toolpath complete: ${stitchedResult.numScanlines}×${stitchedResult.pointsPerLine}`);
+    const stitchTime = performance.now() - stitchStartTime;
+
+    const totalTime = performance.now() - tilingStartTime;
+    console.log(`[WebGPU Worker] Stitching took ${stitchTime.toFixed(1)}ms`);
+    console.log(`[WebGPU Worker] ✅ Tiled toolpath complete: ${stitchedResult.numScanlines}×${stitchedResult.pointsPerLine} in ${totalTime.toFixed(1)}ms total`);
+
+    // Update generation time to reflect total tiled time
+    stitchedResult.generationTime = totalTime;
 
     return stitchedResult;
 }
 
 // Create tiles for toolpath generation with overlap (using integer grid coordinates)
-function createToolpathTiles(bounds, gridStep, xStep, yStep, toolWidth, toolHeight, maxMemoryBytes) {
+// toolWidth and toolHeight are in grid cells (not mm)
+function createToolpathTiles(bounds, gridStep, xStep, yStep, toolWidthCells, toolHeightCells, maxMemoryBytes) {
     // Calculate global grid dimensions
     const globalGridWidth = Math.ceil((bounds.max.x - bounds.min.x) / gridStep) + 1;
     const globalGridHeight = Math.ceil((bounds.max.y - bounds.min.y) / gridStep) + 1;
 
-    // Calculate tool overlap in grid cells
-    const toolOverlapX = Math.ceil(toolWidth / gridStep);
-    const toolOverlapY = Math.ceil(toolHeight / gridStep);
+    // Calculate tool overlap in grid cells (use radius = half diameter)
+    // Tool centered at tile boundary needs terrain extending half tool width beyond boundary
+    const toolOverlapX = Math.ceil(toolWidthCells / 2);
+    const toolOverlapY = Math.ceil(toolHeightCells / 2);
 
     // Binary search for optimal tile size in grid cells
     let low = Math.max(toolOverlapX, toolOverlapY) * 2; // At least 2x tool size
