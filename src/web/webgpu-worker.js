@@ -83,6 +83,9 @@ async function initWebGPU() {
 }
 
 const rasterizeShaderCode = `
+// Sentinel value for empty cells (far below any real geometry)
+const EMPTY_CELL: f32 = -1e10;
+
 struct Uniforms {
     bounds_min_x: f32,
     bounds_min_y: f32,
@@ -263,21 +266,35 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
     }
 
-    // Write output (X/Y as grid indices, not world coordinates)
+    // Write output based on filter mode
     let output_idx = grid_y * uniforms.grid_width + grid_x;
-    output_points[output_idx * 3u] = f32(grid_x);
-    output_points[output_idx * 3u + 1u] = f32(grid_y);
-    output_points[output_idx * 3u + 2u] = best_z;
 
-    if (found) {
-        valid_mask[output_idx] = 1u;
+    if (uniforms.filter_mode == 0u) {
+        // Terrain: Dense output (Z-only, sentinel value for empty cells)
+        if (found) {
+            output_points[output_idx] = best_z;
+        } else {
+            output_points[output_idx] = EMPTY_CELL;
+        }
     } else {
-        valid_mask[output_idx] = 0u;
+        // Tool: Sparse output (X, Y, Z triplets with valid mask)
+        output_points[output_idx * 3u] = f32(grid_x);
+        output_points[output_idx * 3u + 1u] = f32(grid_y);
+        output_points[output_idx * 3u + 2u] = best_z;
+
+        if (found) {
+            valid_mask[output_idx] = 1u;
+        } else {
+            valid_mask[output_idx] = 0u;
+        }
     }
 }
 `;
 
 const toolpathShaderCode = `
+// Sentinel value for empty terrain cells (must match rasterize shader)
+const EMPTY_CELL: f32 = -1e10;
+
 struct SparseToolPoint {
     x_offset: i32,
     y_offset: i32,
@@ -329,7 +346,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let terrain_idx = u32(terrain_y) * uniforms.terrain_width + u32(terrain_x);
         let terrain_z = terrain_map[terrain_idx];
 
-        if (terrain_z == terrain_z) {
+        // Check if terrain cell has geometry (not empty sentinel value)
+        if (terrain_z > EMPTY_CELL + 1.0) {
             let delta = tool_point.z_value - terrain_z;
             min_delta = min(min_delta, delta);
         }
@@ -478,10 +496,14 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverri
 
     console.log(`[WebGPU Worker] Grid: ${gridWidth}x${gridHeight} = ${totalGridPoints.toLocaleString()} points`);
 
-    // Check for WebGPU limits
-    const outputSize = totalGridPoints * 3 * 4;
+    // Calculate buffer size based on filter mode
+    // filterMode 0 (terrain): Dense Z-only output (1 float per grid cell)
+    // filterMode 1 (tool): Sparse X,Y,Z output (3 floats per grid cell)
+    const floatsPerPoint = filterMode === 0 ? 1 : 3;
+    const outputSize = totalGridPoints * floatsPerPoint * 4;
     const maxBufferSize = device.limits.maxBufferSize || 268435456; // 256MB default
-    console.log(`[WebGPU Worker] Output buffer size: ${(outputSize / 1024 / 1024).toFixed(2)} MB (max: ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB)`);
+    const modeStr = filterMode === 0 ? 'terrain (dense Z-only)' : 'tool (sparse XYZ)';
+    console.log(`[WebGPU Worker] Output buffer size: ${(outputSize / 1024 / 1024).toFixed(2)} MB for ${modeStr} (max: ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB)`);
 
     if (outputSize > maxBufferSize) {
         throw new Error(`Output buffer too large: ${(outputSize / 1024 / 1024).toFixed(2)} MB exceeds device limit of ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB. Try a larger step size.`);
@@ -607,16 +629,35 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverri
     const outputData = new Float32Array(stagingOutputBuffer.getMappedRange());
     const validMaskData = new Uint32Array(stagingValidMaskBuffer.getMappedRange());
 
-    // Compact output - remove invalid points
-    const validPoints = [];
-    for (let i = 0; i < totalGridPoints; i++) {
-        if (validMaskData[i] === 1) {
-            validPoints.push(
-                outputData[i * 3],
-                outputData[i * 3 + 1],
-                outputData[i * 3 + 2]
-            );
+    let result, pointCount;
+
+    if (filterMode === 0) {
+        // Terrain: Dense output (Z-only), no compaction needed
+        // Copy the full array (already has NaN for empty cells)
+        result = new Float32Array(outputData);
+        pointCount = totalGridPoints;
+
+        // Count actual valid points for logging (sentinel value = -1e10)
+        const EMPTY_CELL = -1e10;
+        let validCount = 0;
+        for (let i = 0; i < totalGridPoints; i++) {
+            if (result[i] > EMPTY_CELL + 1) validCount++;  // Any value significantly above sentinel
         }
+        console.log(`[WebGPU Worker] Dense terrain: ${totalGridPoints} grid cells, ${validCount} with geometry (${(validCount/totalGridPoints*100).toFixed(1)}% coverage)`);
+    } else {
+        // Tool: Sparse output (X,Y,Z triplets), compact to remove invalid points
+        const validPoints = [];
+        for (let i = 0; i < totalGridPoints; i++) {
+            if (validMaskData[i] === 1) {
+                validPoints.push(
+                    outputData[i * 3],
+                    outputData[i * 3 + 1],
+                    outputData[i * 3 + 2]
+                );
+            }
+        }
+        result = new Float32Array(validPoints);
+        pointCount = validPoints.length / 3;
     }
 
     stagingOutputBuffer.unmap();
@@ -632,27 +673,38 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverri
     stagingOutputBuffer.destroy();
     stagingValidMaskBuffer.destroy();
 
-    const result = new Float32Array(validPoints);
-    const pointCount = validPoints.length / 3;
-
     const endTime = performance.now();
     const conversionTime = endTime - startTime;
     console.log(`[WebGPU Worker] ✅ Rasterize complete: ${pointCount} points in ${conversionTime.toFixed(1)}ms`);
     console.log(`[WebGPU Worker] Bounds: min(${bounds.min.x.toFixed(2)}, ${bounds.min.y.toFixed(2)}, ${bounds.min.z.toFixed(2)}) max(${bounds.max.x.toFixed(2)}, ${bounds.max.y.toFixed(2)}, ${bounds.max.z.toFixed(2)})`);
 
     // Verify result data integrity
-    if (result.length > 0) {
-        const firstPoint = `(${result[0].toFixed(3)}, ${result[1].toFixed(3)}, ${result[2].toFixed(3)})`;
-        const lastIdx = result.length - 3;
-        const lastPoint = `(${result[lastIdx].toFixed(3)}, ${result[lastIdx+1].toFixed(3)}, ${result[lastIdx+2].toFixed(3)})`;
-        console.log(`[WebGPU Worker] First point: ${firstPoint}, Last point: ${lastPoint}`);
+    if (filterMode === 0) {
+        // Terrain: Dense Z-only format
+        if (result.length > 0) {
+            const EMPTY_CELL = -1e10;
+            const firstZ = result[0] <= EMPTY_CELL + 1 ? 'EMPTY' : result[0].toFixed(3);
+            const lastZ = result[result.length-1] <= EMPTY_CELL + 1 ? 'EMPTY' : result[result.length-1].toFixed(3);
+            console.log(`[WebGPU Worker] First Z: ${firstZ}, Last Z: ${lastZ}`);
+        }
+    } else {
+        // Tool: Sparse X,Y,Z format
+        if (result.length > 0) {
+            const firstPoint = `(${result[0].toFixed(3)}, ${result[1].toFixed(3)}, ${result[2].toFixed(3)})`;
+            const lastIdx = result.length - 3;
+            const lastPoint = `(${result[lastIdx].toFixed(3)}, ${result[lastIdx+1].toFixed(3)}, ${result[lastIdx+2].toFixed(3)})`;
+            console.log(`[WebGPU Worker] First point: ${firstPoint}, Last point: ${lastPoint}`);
+        }
     }
 
     return {
         positions: result,
         pointCount: pointCount,
         bounds: bounds,
-        conversionTime: conversionTime
+        conversionTime: conversionTime,
+        gridWidth: gridWidth,
+        gridHeight: gridHeight,
+        isDense: filterMode === 0  // True for terrain (dense), false for tool (sparse)
     };
 }
 
@@ -663,9 +715,11 @@ function createTiles(bounds, stepSize, maxMemoryBytes) {
     const aspectRatio = width / height;
 
     // Calculate how many grid points we can fit in one tile
-    // Memory needed: (gridW * gridH * 3 * 4) for output + (gridW * gridH * 4) for mask
-    const bytesPerPoint = 3 * 4 + 4; // 16 bytes per grid point
+    // Terrain uses dense Z-only format: (gridW * gridH * 1 * 4) for output
+    // This is 4x more efficient than the old sparse format (16 bytes → 4 bytes per point)
+    const bytesPerPoint = 1 * 4; // 4 bytes per grid point (Z-only)
     const maxPointsPerTile = Math.floor(maxMemoryBytes / bytesPerPoint);
+    console.log(`[WebGPU Worker] Dense terrain format: ${bytesPerPoint} bytes/point (was 16), can fit ${(maxPointsPerTile/1e6).toFixed(1)}M points per tile`);
 
     // Calculate optimal tile grid dimensions while respecting aspect ratio
     // We want: tileGridW * tileGridH <= maxPointsPerTile
@@ -736,109 +790,142 @@ function createTiles(bounds, stepSize, maxMemoryBytes) {
     return { tiles, tilesX, tilesY };
 }
 
-// Stitch point clouds from multiple tiles
+// Stitch tiles from multiple rasterization passes
 function stitchTiles(tileResults, fullBounds, stepSize) {
     if (tileResults.length === 0) {
         throw new Error('No tile results to stitch');
     }
 
-    if (tileResults.length === 1) {
-        // Single tile - but still need to convert to global coordinate system
-        const result = tileResults[0];
-        if (!result.tileBounds) {
-            return result; // Already in global coords
-        }
+    // Check if results are dense (terrain) or sparse (tool)
+    const isDense = tileResults[0].isDense;
 
-        // Convert tile-local grid indices to global grid indices
-        const positions = result.positions;
-        const globalPositions = new Float32Array(positions.length);
+    if (isDense) {
+        // DENSE TERRAIN STITCHING: Simple array copying (Z-only format)
+        console.log(`[WebGPU Worker] Stitching ${tileResults.length} dense terrain tiles...`);
 
-        // Calculate offset from tile origin to global origin (in grid cells)
-        const tileOffsetX = Math.round((result.tileBounds.min.x - fullBounds.min.x) / stepSize);
-        const tileOffsetY = Math.round((result.tileBounds.min.y - fullBounds.min.y) / stepSize);
+        // Calculate global grid dimensions
+        const globalWidth = Math.ceil((fullBounds.max.x - fullBounds.min.x) / stepSize) + 1;
+        const globalHeight = Math.ceil((fullBounds.max.y - fullBounds.min.y) / stepSize) + 1;
+        const totalGridCells = globalWidth * globalHeight;
 
-        for (let i = 0; i < positions.length; i += 3) {
-            const localGridX = positions[i];
-            const localGridY = positions[i + 1];
-            const z = positions[i + 2];
+        // Allocate global dense grid (Z-only), initialize to sentinel value
+        const EMPTY_CELL = -1e10;
+        const globalGrid = new Float32Array(totalGridCells);
+        globalGrid.fill(EMPTY_CELL);
 
-            // Convert local grid indices to global grid indices
-            globalPositions[i] = localGridX + tileOffsetX;
-            globalPositions[i + 1] = localGridY + tileOffsetY;
-            globalPositions[i + 2] = z;
-        }
+        console.log(`[WebGPU Worker] Global grid: ${globalWidth}x${globalHeight} = ${totalGridCells.toLocaleString()} cells`);
 
-        return {
-            positions: globalPositions,
-            pointCount: result.pointCount,
-            bounds: fullBounds,
-            conversionTime: result.conversionTime,
-            tileCount: 1
-        };
-    }
+        // Copy each tile's Z-values to the correct position in global grid
+        for (const tile of tileResults) {
+            // Calculate tile's position in global grid
+            const tileOffsetX = Math.round((tile.tileBounds.min.x - fullBounds.min.x) / stepSize);
+            const tileOffsetY = Math.round((tile.tileBounds.min.y - fullBounds.min.y) / stepSize);
 
-    // Calculate total points
-    let totalPoints = 0;
-    for (const result of tileResults) {
-        totalPoints += result.pointCount;
-    }
+            const tileWidth = tile.gridWidth;
+            const tileHeight = tile.gridHeight;
 
-    console.log(`[WebGPU Worker] Stitching ${tileResults.length} tiles with ${totalPoints} total points (before deduplication)`);
+            // Copy Z-values row by row
+            for (let ty = 0; ty < tileHeight; ty++) {
+                const globalY = tileOffsetY + ty;
+                if (globalY >= globalHeight) continue;
 
-    // Use a Map to deduplicate overlapping points, keeping highest Z
-    // Key: "gridX,gridY", Value: { gridX, gridY, z }
-    const pointMap = new Map();
+                for (let tx = 0; tx < tileWidth; tx++) {
+                    const globalX = tileOffsetX + tx;
+                    if (globalX >= globalWidth) continue;
 
-    for (const result of tileResults) {
-        const positions = result.positions;
+                    const tileIdx = ty * tileWidth + tx;
+                    const globalIdx = globalY * globalWidth + globalX;
+                    const tileZ = tile.positions[tileIdx];
 
-        // Calculate offset from tile origin to global origin (in grid cells)
-        const tileOffsetX = Math.round((result.tileBounds.min.x - fullBounds.min.x) / stepSize);
-        const tileOffsetY = Math.round((result.tileBounds.min.y - fullBounds.min.y) / stepSize);
-
-        // Convert each point from tile-local to global grid coordinates
-        for (let i = 0; i < positions.length; i += 3) {
-            const localGridX = positions[i];
-            const localGridY = positions[i + 1];
-            const z = positions[i + 2];
-
-            // Convert local grid indices to global grid indices
-            const globalGridX = localGridX + tileOffsetX;
-            const globalGridY = localGridY + tileOffsetY;
-
-            const key = `${globalGridX},${globalGridY}`;
-            const existing = pointMap.get(key);
-
-            // Keep highest Z value (for terrain surface)
-            if (!existing || z > existing.z) {
-                pointMap.set(key, { x: globalGridX, y: globalGridY, z });
+                    // For overlapping cells, keep max Z (terrain surface)
+                    // Skip empty cells (sentinel value)
+                    if (tileZ > EMPTY_CELL + 1) {
+                        const existingZ = globalGrid[globalIdx];
+                        if (existingZ <= EMPTY_CELL + 1 || tileZ > existingZ) {
+                            globalGrid[globalIdx] = tileZ;
+                        }
+                    }
+                }
             }
         }
+
+        // Count valid cells (above sentinel value)
+        let validCount = 0;
+        for (let i = 0; i < totalGridCells; i++) {
+            if (globalGrid[i] > EMPTY_CELL + 1) validCount++;
+        }
+
+        console.log(`[WebGPU Worker] ✅ Stitched: ${totalGridCells} total cells, ${validCount} with geometry (${(validCount/totalGridCells*100).toFixed(1)}% coverage)`);
+
+        return {
+            positions: globalGrid,
+            pointCount: totalGridCells,
+            bounds: fullBounds,
+            gridWidth: globalWidth,
+            gridHeight: globalHeight,
+            isDense: true,
+            conversionTime: tileResults.reduce((sum, r) => sum + (r.conversionTime || 0), 0),
+            tileCount: tileResults.length
+        };
+
+    } else {
+        // SPARSE TOOL STITCHING: Keep existing deduplication logic (X,Y,Z triplets)
+        console.log(`[WebGPU Worker] Stitching ${tileResults.length} sparse tool tiles...`);
+
+        const pointMap = new Map();
+
+        for (const result of tileResults) {
+            const positions = result.positions;
+
+            // Calculate offset from tile origin to global origin (in grid cells)
+            const tileOffsetX = Math.round((result.tileBounds.min.x - fullBounds.min.x) / stepSize);
+            const tileOffsetY = Math.round((result.tileBounds.min.y - fullBounds.min.y) / stepSize);
+
+            // Convert each point from tile-local to global grid coordinates
+            for (let i = 0; i < positions.length; i += 3) {
+                const localGridX = positions[i];
+                const localGridY = positions[i + 1];
+                const z = positions[i + 2];
+
+                // Convert local grid indices to global grid indices
+                const globalGridX = localGridX + tileOffsetX;
+                const globalGridY = localGridY + tileOffsetY;
+
+                const key = `${globalGridX},${globalGridY}`;
+                const existing = pointMap.get(key);
+
+                // Keep lowest Z value (for tool)
+                if (!existing || z < existing.z) {
+                    pointMap.set(key, { x: globalGridX, y: globalGridY, z });
+                }
+            }
+        }
+
+        // Convert Map to flat array
+        const finalPointCount = pointMap.size;
+        const allPositions = new Float32Array(finalPointCount * 3);
+        let writeOffset = 0;
+
+        for (const point of pointMap.values()) {
+            allPositions[writeOffset++] = point.x;
+            allPositions[writeOffset++] = point.y;
+            allPositions[writeOffset++] = point.z;
+        }
+
+        console.log(`[WebGPU Worker] ✅ Stitched: ${finalPointCount} unique sparse points`);
+
+        return {
+            positions: allPositions,
+            pointCount: finalPointCount,
+            bounds: fullBounds,
+            isDense: false,
+            conversionTime: tileResults.reduce((sum, r) => sum + (r.conversionTime || 0), 0),
+            tileCount: tileResults.length
+        };
     }
-
-    // Convert Map to flat array
-    const finalPointCount = pointMap.size;
-    const allPositions = new Float32Array(finalPointCount * 3);
-    let writeOffset = 0;
-
-    for (const point of pointMap.values()) {
-        allPositions[writeOffset++] = point.x;
-        allPositions[writeOffset++] = point.y;
-        allPositions[writeOffset++] = point.z;
-    }
-
-    console.log(`[WebGPU Worker] After deduplication: ${finalPointCount} unique points`);
-
-    return {
-        positions: allPositions,
-        pointCount: finalPointCount,
-        bounds: fullBounds,
-        conversionTime: tileResults.reduce((sum, r) => sum + (r.conversionTime || 0), 0),
-        tileCount: tileResults.length
-    };
 }
 
-// Check if tiling is needed
+// Check if tiling is needed (only called for terrain, which uses dense format)
 function shouldUseTiling(bounds, stepSize) {
     if (!config || !config.autoTiling) return false;
     if (!deviceCapabilities) return false;
@@ -847,9 +934,9 @@ function shouldUseTiling(bounds, stepSize) {
     const gridHeight = Math.ceil((bounds.max.y - bounds.min.y) / stepSize) + 1;
     const totalPoints = gridWidth * gridHeight;
 
-    const gpuOutputBuffer = totalPoints * 3 * 4;
-    const gpuMaskBuffer = totalPoints * 4;
-    const totalGPUMemory = gpuOutputBuffer + gpuMaskBuffer;
+    // Terrain uses dense Z-only format: 1 float (4 bytes) per grid cell
+    const gpuOutputBuffer = totalPoints * 1 * 4;
+    const totalGPUMemory = gpuOutputBuffer;  // No mask needed for dense output
 
     // Use the smaller of configured limit or device capability
     const configuredLimit = config.maxGPUMemoryMB * 1024 * 1024;
@@ -903,84 +990,82 @@ async function rasterizeMesh(triangles, stepSize, filterMode, boundsOverride = n
 // Helper: Create height map from point cloud
 // Points come from GPU as [gridX, gridY, Z] - grid indices for X/Y
 function createHeightMapFromPoints(points, gridStep, bounds = null) {
-    // Calculate grid dimensions from bounds
-    let width, height, minX, minY, minZ, maxX, maxY, maxZ;
-
-    if (bounds) {
-        // Use provided bounds to calculate grid dimensions
-        minX = bounds.min.x;
-        minY = bounds.min.y;
-        minZ = bounds.min.z;
-        maxX = bounds.max.x;
-        maxY = bounds.max.y;
-        maxZ = bounds.max.z;
-        width = Math.ceil((maxX - minX) / gridStep) + 1;
-        height = Math.ceil((maxY - minY) / gridStep) + 1;
-    } else {
-        // Calculate bounds from points (points are grid indices for X/Y)
-        if (!points || points.length === 0) {
-            throw new Error('No points provided and no bounds specified');
-        }
-
-        let minGridX = Infinity, minGridY = Infinity;
-        let maxGridX = -Infinity, maxGridY = -Infinity;
-        minZ = Infinity;
-        maxZ = -Infinity;
-
-        for (let i = 0; i < points.length; i += 3) {
-            minGridX = Math.min(minGridX, points[i]);
-            maxGridX = Math.max(maxGridX, points[i]);
-            minGridY = Math.min(minGridY, points[i + 1]);
-            maxGridY = Math.max(maxGridY, points[i + 1]);
-            minZ = Math.min(minZ, points[i + 2]);
-            maxZ = Math.max(maxZ, points[i + 2]);
-        }
-
-        width = Math.floor(maxGridX) + 1;
-        height = Math.floor(maxGridY) + 1;
-        // For bounds reporting (convert back to world coords)
-        minX = 0; maxX = (width - 1) * gridStep;
-        minY = 0; maxY = (height - 1) * gridStep;
+    if (!points || points.length === 0) {
+        throw new Error('No points provided');
     }
 
+    // Calculate expected dimensions from bounds
+    if (!bounds) {
+        throw new Error('Bounds required for height map creation');
+    }
+
+    const minX = bounds.min.x;
+    const minY = bounds.min.y;
+    const minZ = bounds.min.z;
+    const maxX = bounds.max.x;
+    const maxY = bounds.max.y;
+    const maxZ = bounds.max.z;
+    const width = Math.ceil((maxX - minX) / gridStep) + 1;
+    const height = Math.ceil((maxY - minY) / gridStep) + 1;
+    const expectedSize = width * height;
+
+    // Check if points are already in dense format (Z-only array)
+    if (points.length === expectedSize) {
+        // Already dense! Terrain from new rasterizer
+        console.log(`[WebGPU Worker] Terrain already dense: ${width}x${height} = ${expectedSize} cells`);
+        return {
+            grid: points,  // Already a dense Z-only array
+            width,
+            height,
+            minX,
+            minY,
+            minZ,
+            maxX,
+            maxY,
+            maxZ
+        };
+    }
+
+    // Otherwise, sparse format (X,Y,Z triplets) - convert to dense
+    console.log(`[WebGPU Worker] Converting sparse terrain to dense: ${points.length/3} points → ${width}x${height} grid`);
+
+    // Initialize with sentinel value for empty cells
+    const EMPTY_CELL = -1e10;
     const grid = new Float32Array(width * height);
-    grid.fill(NaN); // Initialize with NaN
+    grid.fill(EMPTY_CELL);
 
-    // Fill grid with point data (points are [gridX, gridY, Z])
-    if (points && points.length > 0) {
-        let outOfBoundsCount = 0;
-        let minSeenX = Infinity, maxSeenX = -Infinity;
-        let minSeenY = Infinity, maxSeenY = -Infinity;
+    let outOfBoundsCount = 0;
+    let minSeenX = Infinity, maxSeenX = -Infinity;
+    let minSeenY = Infinity, maxSeenY = -Infinity;
 
-        for (let i = 0; i < points.length; i += 3) {
-            const gridX = Math.floor(points[i]);      // Grid index
-            const gridY = Math.floor(points[i + 1]);  // Grid index
-            const z = points[i + 2];
+    for (let i = 0; i < points.length; i += 3) {
+        const gridX = Math.floor(points[i]);      // Grid index
+        const gridY = Math.floor(points[i + 1]);  // Grid index
+        const z = points[i + 2];
 
-            minSeenX = Math.min(minSeenX, gridX);
-            maxSeenX = Math.max(maxSeenX, gridX);
-            minSeenY = Math.min(minSeenY, gridY);
-            maxSeenY = Math.max(maxSeenY, gridY);
+        minSeenX = Math.min(minSeenX, gridX);
+        maxSeenX = Math.max(maxSeenX, gridX);
+        minSeenY = Math.min(minSeenY, gridY);
+        maxSeenY = Math.max(maxSeenY, gridY);
 
-            // Bounds check
-            if (gridX >= 0 && gridX < width && gridY >= 0 && gridY < height) {
-                const idx = gridY * width + gridX;
+        // Bounds check
+        if (gridX >= 0 && gridX < width && gridY >= 0 && gridY < height) {
+            const idx = gridY * width + gridX;
 
-                // Keep max Z value for each cell (terrain surface)
-                if (isNaN(grid[idx]) || z > grid[idx]) {
-                    grid[idx] = z;
-                }
-            } else {
-                outOfBoundsCount++;
+            // Keep max Z value for each cell (terrain surface)
+            if (grid[idx] <= EMPTY_CELL + 1 || z > grid[idx]) {
+                grid[idx] = z;
             }
+        } else {
+            outOfBoundsCount++;
         }
+    }
 
-        if (outOfBoundsCount > 0) {
-            console.error(`[WebGPU Worker] ERROR: ${outOfBoundsCount} points out of bounds!`);
-            console.error(`[WebGPU Worker]   Grid dimensions: ${width}x${height}`);
-            console.error(`[WebGPU Worker]   Point range: X[${minSeenX}, ${maxSeenX}] Y[${minSeenY}, ${maxSeenY}]`);
-            console.error(`[WebGPU Worker]   Expected range: X[0, ${width-1}] Y[0, ${height-1}]`);
-        }
+    if (outOfBoundsCount > 0) {
+        console.error(`[WebGPU Worker] ERROR: ${outOfBoundsCount} points out of bounds!`);
+        console.error(`[WebGPU Worker]   Grid dimensions: ${width}x${height}`);
+        console.error(`[WebGPU Worker]   Point range: X[${minSeenX}, ${maxSeenX}] Y[${minSeenY}, ${maxSeenY}]`);
+        console.error(`[WebGPU Worker]   Expected range: X[0, ${width-1}] Y[0, ${height-1}]`);
     }
 
     return {
@@ -1254,20 +1339,30 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
         return await generateToolpathSingle(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds);
     }
 
-    // Check if terrain is sparse (much smaller than bounds)
-    // This happens with padded bounds or circular terrain in square bounds
-    const terrainArea = terrainPoints.length / 3; // Number of terrain points
-    const boundsArea = outputWidth * outputHeight; // Total grid points in bounds
+    // Check if terrain is dense or sparse
+    const expectedDenseSize = outputWidth * outputHeight;
+    const isDense = terrainPoints.length === expectedDenseSize;
+
+    // For sparse terrain, calculate density
+    const terrainArea = isDense ? expectedDenseSize : terrainPoints.length / 3;
+    const boundsArea = outputWidth * outputHeight;
     const terrainDensity = terrainArea / boundsArea;
 
-    if (terrainDensity < 0.3) {
-        // Terrain is sparse (<30% coverage) - tiling doesn't help, just use single pass
-        console.log(`[WebGPU Worker] Terrain is sparse (${(terrainDensity * 100).toFixed(1)}% coverage) - skipping tiling`);
+    // NOTE: We can only skip tiling if BOTH:
+    // 1. Terrain is sparse (tiling wouldn't help distribute work)
+    // 2. Output buffer actually fits in memory (otherwise we MUST tile)
+    // If terrain is sparse but output is huge, we still need to tile
+    const canSkipTiling = terrainDensity < 0.3 && outputMemory <= maxSafeSize;
+
+    if (canSkipTiling) {
+        // Terrain is sparse and output fits - tiling won't help, use single pass
+        console.log(`[WebGPU Worker] Terrain is sparse (${(terrainDensity * 100).toFixed(1)}% coverage) and output fits - skipping tiling`);
         return await generateToolpathSingle(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds);
     }
 
     // Tiling needed
     console.log('[WebGPU Worker] 🔲 Using tiled toolpath generation');
+    console.log(`[WebGPU Worker] Terrain format: ${isDense ? 'DENSE' : 'SPARSE'} (${terrainPoints.length} ${isDense ? 'cells' : 'points'})`);
     console.log(`[WebGPU Worker] Tool dimensions: ${toolWidth.toFixed(2)}mm × ${toolHeight.toFixed(2)}mm`);
 
     // Create tiles with tool-size overlap
@@ -1280,30 +1375,63 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
         const tile = tiles[i];
         console.log(`[WebGPU Worker] Processing tile ${i + 1}/${tiles.length}...`);
 
-        // Filter terrain points to this tile's bounds
-        // NOTE: terrainPoints are [gridX, gridY, Z] where X/Y are grid indices, not mm
-        // Convert tile bounds from mm to grid indices for comparison
-        const tileMinGridX = Math.floor((tile.bounds.min.x - terrainBounds.min.x) / gridStep);
-        const tileMaxGridX = Math.ceil((tile.bounds.max.x - terrainBounds.min.x) / gridStep);
-        const tileMinGridY = Math.floor((tile.bounds.min.y - terrainBounds.min.y) / gridStep);
-        const tileMaxGridY = Math.ceil((tile.bounds.max.y - terrainBounds.min.y) / gridStep);
+        // Extract terrain data for this tile
+        let tileTerrainPoints;
 
-        const tileTerrainPoints = [];
-        for (let j = 0; j < terrainPoints.length; j += 3) {
-            const gridX = Math.floor(terrainPoints[j]);      // Grid index
-            const gridY = Math.floor(terrainPoints[j + 1]);  // Grid index
-            const z = terrainPoints[j + 2];
+        if (isDense) {
+            // DENSE TERRAIN: Extract sub-grid
+            const tileMinGridX = Math.floor((tile.bounds.min.x - terrainBounds.min.x) / gridStep);
+            const tileMaxGridX = Math.ceil((tile.bounds.max.x - terrainBounds.min.x) / gridStep);
+            const tileMinGridY = Math.floor((tile.bounds.min.y - terrainBounds.min.y) / gridStep);
+            const tileMaxGridY = Math.ceil((tile.bounds.max.y - terrainBounds.min.y) / gridStep);
 
-            // Compare grid indices
-            if (gridX >= tileMinGridX && gridX <= tileMaxGridX &&
-                gridY >= tileMinGridY && gridY <= tileMaxGridY) {
-                tileTerrainPoints.push(terrainPoints[j], terrainPoints[j + 1], z);
+            const tileWidth = tileMaxGridX - tileMinGridX + 1;
+            const tileHeight = tileMaxGridY - tileMinGridY + 1;
+            tileTerrainPoints = new Float32Array(tileWidth * tileHeight);
+
+            console.log(`[WebGPU Worker] Tile ${i+1} dense extraction: ${tileWidth}x${tileHeight} from global ${outputWidth}x${outputHeight}`);
+
+            // Copy relevant sub-grid from full terrain
+            const EMPTY_CELL = -1e10;
+            tileTerrainPoints.fill(EMPTY_CELL);
+
+            for (let ty = 0; ty < tileHeight; ty++) {
+                const globalY = tileMinGridY + ty;
+                if (globalY < 0 || globalY >= outputHeight) continue;
+
+                for (let tx = 0; tx < tileWidth; tx++) {
+                    const globalX = tileMinGridX + tx;
+                    if (globalX < 0 || globalX >= outputWidth) continue;
+
+                    const globalIdx = globalY * outputWidth + globalX;
+                    const tileIdx = ty * tileWidth + tx;
+                    tileTerrainPoints[tileIdx] = terrainPoints[globalIdx];
+                }
             }
+        } else {
+            // SPARSE TERRAIN: Filter points to tile bounds
+            const tileMinGridX = Math.floor((tile.bounds.min.x - terrainBounds.min.x) / gridStep);
+            const tileMaxGridX = Math.ceil((tile.bounds.max.x - terrainBounds.min.x) / gridStep);
+            const tileMinGridY = Math.floor((tile.bounds.min.y - terrainBounds.min.y) / gridStep);
+            const tileMaxGridY = Math.ceil((tile.bounds.max.y - terrainBounds.min.y) / gridStep);
+
+            const filteredPoints = [];
+            for (let j = 0; j < terrainPoints.length; j += 3) {
+                const gridX = Math.floor(terrainPoints[j]);
+                const gridY = Math.floor(terrainPoints[j + 1]);
+                const z = terrainPoints[j + 2];
+
+                if (gridX >= tileMinGridX && gridX <= tileMaxGridX &&
+                    gridY >= tileMinGridY && gridY <= tileMaxGridY) {
+                    filteredPoints.push(terrainPoints[j], terrainPoints[j + 1], z);
+                }
+            }
+            tileTerrainPoints = new Float32Array(filteredPoints);
         }
 
         // Generate toolpath for this tile
         const tileToolpathResult = await generateToolpathSingle(
-            new Float32Array(tileTerrainPoints),
+            tileTerrainPoints,
             toolPoints,
             xStep,
             yStep,

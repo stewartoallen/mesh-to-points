@@ -497,22 +497,39 @@ function handleRasterizeComplete(data, isForTool) {
 
     // Verify data integrity on main thread
     if (data.positions && data.positions.length > 0) {
-        const firstPoint = `(${data.positions[0].toFixed(3)}, ${data.positions[1].toFixed(3)}, ${data.positions[2].toFixed(3)})`;
-        const lastIdx = data.positions.length - 3;
-        const lastPoint = `(${data.positions[lastIdx].toFixed(3)}, ${data.positions[lastIdx+1].toFixed(3)}, ${data.positions[lastIdx+2].toFixed(3)})`;
-        console.log(`[Main Thread] Received first point: ${firstPoint}, last point: ${lastPoint}`);
+        if (data.isDense) {
+            // Dense format (terrain): Z-only array with sentinel value for empty cells
+            const EMPTY_CELL = -1e10;
+            const firstZ = data.positions[0] <= EMPTY_CELL + 1 ? 'EMPTY' : data.positions[0].toFixed(3);
+            const lastZ = data.positions[data.positions.length-1] <= EMPTY_CELL + 1 ? 'EMPTY' : data.positions[data.positions.length-1].toFixed(3);
+            console.log(`[Main Thread] Dense terrain: first Z=${firstZ}, last Z=${lastZ}, grid=${data.gridWidth}x${data.gridHeight}`);
 
-        // Check for NaN or Infinity
-        let hasInvalid = false;
-        for (let i = 0; i < Math.min(data.positions.length, 100); i++) {
-            if (!isFinite(data.positions[i])) {
-                hasInvalid = true;
-                console.error(`[Main Thread] Invalid value at index ${i}: ${data.positions[i]}`);
-                break;
+            // Count empty cells (sentinel value)
+            let emptyCount = 0;
+            for (let i = 0; i < data.positions.length; i++) {
+                if (data.positions[i] <= EMPTY_CELL + 1) emptyCount++;
             }
-        }
-        if (!hasInvalid) {
-            console.log(`[Main Thread] Data integrity check passed`);
+            const coverage = ((1 - emptyCount/data.positions.length) * 100).toFixed(1);
+            console.log(`[Main Thread] Dense terrain: ${coverage}% coverage (${data.positions.length - emptyCount} valid cells)`);
+        } else {
+            // Sparse format (tool): X,Y,Z triplets
+            const firstPoint = `(${data.positions[0].toFixed(3)}, ${data.positions[1].toFixed(3)}, ${data.positions[2].toFixed(3)})`;
+            const lastIdx = data.positions.length - 3;
+            const lastPoint = `(${data.positions[lastIdx].toFixed(3)}, ${data.positions[lastIdx+1].toFixed(3)}, ${data.positions[lastIdx+2].toFixed(3)})`;
+            console.log(`[Main Thread] Sparse tool: first=${firstPoint}, last=${lastPoint}`);
+
+            // Check for NaN or Infinity
+            let hasInvalid = false;
+            for (let i = 0; i < Math.min(data.positions.length, 100); i++) {
+                if (!isFinite(data.positions[i])) {
+                    hasInvalid = true;
+                    console.error(`[Main Thread] Invalid value at index ${i}: ${data.positions[i]}`);
+                    break;
+                }
+            }
+            if (!hasInvalid) {
+                console.log(`[Main Thread] Data integrity check passed`);
+            }
         }
     }
 
@@ -568,8 +585,8 @@ function handleToolpathComplete(data) {
 // Display point cloud in scene
 function displayPointCloud(data) {
     const renderStart = performance.now();
-    const { positions, pointCount, bounds } = data;
-    console.log('displayPointCloud: received', pointCount, 'points,', positions.byteLength, 'bytes');
+    const { positions, pointCount, bounds, isDense, gridWidth, gridHeight } = data;
+    console.log('displayPointCloud: received', pointCount, 'points,', positions.byteLength, 'bytes, isDense:', isDense);
 
     // Track if this is the first load (to reset camera)
     const isFirstLoad = pointCloud === null;
@@ -583,40 +600,82 @@ function displayPointCloud(data) {
 
     const geomStart = performance.now();
 
-    // Convert grid indices to world coordinates (mm)
-    // GPU outputs [gridX, gridY, Z] where gridX/gridY are indices
-    const worldPositions = new Float32Array(positions.length);
-    for (let i = 0; i < positions.length; i += 3) {
-        const gridX = positions[i];
-        const gridY = positions[i + 1];
-        const z = positions[i + 2];
+    let worldPositions, colors, visualPointCount;
 
-        // Convert grid indices to world coordinates
-        worldPositions[i] = bounds.min.x + gridX * STEP_SIZE;
-        worldPositions[i + 1] = bounds.min.y + gridY * STEP_SIZE;
-        worldPositions[i + 2] = z;
+    if (isDense) {
+        // DENSE TERRAIN: Convert 2D grid (Z-only) to 3D points
+        // Only create points for valid cells (skip NaN)
+        const tempPositions = [];
+        const tempColors = [];
+        const color1 = new THREE.Color(0x00ffff); // Cyan
+        const color2 = new THREE.Color(0x00cccc); // Slightly darker cyan
+
+        for (let gridY = 0; gridY < gridHeight; gridY++) {
+            for (let gridX = 0; gridX < gridWidth; gridX++) {
+                const idx = gridY * gridWidth + gridX;
+                const z = positions[idx];
+
+                // Skip empty cells (sentinel value = -1e10)
+                const EMPTY_CELL = -1e10;
+                if (z > EMPTY_CELL + 1) {
+                    // Convert grid indices to world coordinates (mm)
+                    const worldX = bounds.min.x + gridX * STEP_SIZE;
+                    const worldY = bounds.min.y + gridY * STEP_SIZE;
+
+                    tempPositions.push(worldX, worldY, z);
+
+                    // Checkerboard pattern
+                    const isEven = (gridX + gridY) % 2 === 0;
+                    const color = isEven ? color1 : color2;
+                    tempColors.push(color.r, color.g, color.b);
+                }
+            }
+        }
+
+        worldPositions = new Float32Array(tempPositions);
+        colors = new Float32Array(tempColors);
+        visualPointCount = tempPositions.length / 3;
+
+        console.log(`displayPointCloud: Dense terrain converted ${visualPointCount} valid points from ${gridWidth}x${gridHeight} grid`);
+
+    } else {
+        // SPARSE (tool): Convert grid indices to world coordinates
+        // GPU outputs [gridX, gridY, Z] where gridX/gridY are indices
+        worldPositions = new Float32Array(positions.length);
+        for (let i = 0; i < positions.length; i += 3) {
+            const gridX = positions[i];
+            const gridY = positions[i + 1];
+            const z = positions[i + 2];
+
+            // Convert grid indices to world coordinates
+            worldPositions[i] = bounds.min.x + gridX * STEP_SIZE;
+            worldPositions[i + 1] = bounds.min.y + gridY * STEP_SIZE;
+            worldPositions[i + 2] = z;
+        }
+
+        // Create checkerboard pattern colors
+        colors = new Float32Array(pointCount * 3);
+        const color1 = new THREE.Color(0x00ffff); // Cyan
+        const color2 = new THREE.Color(0x00cccc); // Slightly darker cyan
+
+        for (let i = 0; i < pointCount; i++) {
+            // Checkerboard based on grid indices (already integers)
+            const gridX = Math.floor(positions[i * 3]);
+            const gridY = Math.floor(positions[i * 3 + 1]);
+            const isEven = (gridX + gridY) % 2 === 0;
+            const color = isEven ? color1 : color2;
+
+            colors[i * 3] = color.r;
+            colors[i * 3 + 1] = color.g;
+            colors[i * 3 + 2] = color.b;
+        }
+
+        visualPointCount = pointCount;
     }
 
     // Create point cloud geometry
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(worldPositions, 3));
-
-    // Create checkerboard pattern colors for better surface visualization
-    const colors = new Float32Array(pointCount * 3);
-    const color1 = new THREE.Color(0x00ffff); // Cyan
-    const color2 = new THREE.Color(0x00cccc); // Slightly darker cyan
-
-    for (let i = 0; i < pointCount; i++) {
-        // Checkerboard based on grid indices (already integers)
-        const gridX = Math.floor(positions[i * 3]);
-        const gridY = Math.floor(positions[i * 3 + 1]);
-        const isEven = (gridX + gridY) % 2 === 0;
-        const color = isEven ? color1 : color2;
-
-        colors[i * 3] = color.r;
-        colors[i * 3 + 1] = color.g;
-        colors[i * 3 + 2] = color.b;
-    }
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
     const geomTime = performance.now() - geomStart;
@@ -642,8 +701,8 @@ function displayPointCloud(data) {
 
     scene.add(pointCloud);
 
-    // Update info panel
-    pointCountEl.textContent = pointCount.toLocaleString();
+    // Update info panel (use visualPointCount for display)
+    pointCountEl.textContent = visualPointCount.toLocaleString();
     boundsEl.textContent = `${formatBounds(bounds.min)} to ${formatBounds(bounds.max)}`;
     infoPanel.classList.remove('hidden');
 
