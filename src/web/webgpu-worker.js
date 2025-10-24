@@ -774,10 +774,36 @@ function shouldUseTiling(bounds, stepSize) {
     return totalGPUMemory > maxSafeSize;
 }
 
-// Rasterize mesh - wrapper that will be used for potential tiling at toolpath stage
+// Rasterize mesh - wrapper that handles automatic tiling if needed
 async function rasterizeMesh(triangles, stepSize, filterMode, boundsOverride = null) {
-    // Just use single-pass for now - tiling happens at toolpath generation stage
-    return await rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverride);
+    const bounds = boundsOverride || calculateBounds(triangles);
+
+    // Check if tiling is needed
+    if (shouldUseTiling(bounds, stepSize)) {
+        console.log('[WebGPU Worker] Tiling required - switching to tiled rasterization');
+
+        // Calculate max safe size per tile
+        const configuredLimit = config.maxGPUMemoryMB * 1024 * 1024;
+        const deviceLimit = deviceCapabilities.maxStorageBufferBindingSize;
+        const maxSafeSize = Math.min(configuredLimit, deviceLimit) * config.gpuMemorySafetyMargin;
+
+        // Create tiles
+        const { tiles } = createTiles(bounds, stepSize, maxSafeSize);
+
+        // Rasterize each tile
+        const tileResults = [];
+        for (let i = 0; i < tiles.length; i++) {
+            console.log(`[WebGPU Worker] Processing tile ${i + 1}/${tiles.length}`);
+            const tileResult = await rasterizeMeshSingle(triangles, stepSize, filterMode, tiles[i].bounds);
+            tileResults.push(tileResult);
+        }
+
+        // Stitch tiles together
+        return stitchTiles(tileResults, bounds);
+    } else {
+        // Single-pass rasterization
+        return await rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverride);
+    }
 }
 
 // Helper: Create height map from point cloud
