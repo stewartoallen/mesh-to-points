@@ -582,9 +582,24 @@ function displayPointCloud(data) {
     }
 
     const geomStart = performance.now();
+
+    // Convert grid indices to world coordinates (mm)
+    // GPU outputs [gridX, gridY, Z] where gridX/gridY are indices
+    const worldPositions = new Float32Array(positions.length);
+    for (let i = 0; i < positions.length; i += 3) {
+        const gridX = positions[i];
+        const gridY = positions[i + 1];
+        const z = positions[i + 2];
+
+        // Convert grid indices to world coordinates
+        worldPositions[i] = bounds.min.x + gridX * STEP_SIZE;
+        worldPositions[i + 1] = bounds.min.y + gridY * STEP_SIZE;
+        worldPositions[i + 2] = z;
+    }
+
     // Create point cloud geometry
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('position', new THREE.BufferAttribute(worldPositions, 3));
 
     // Create checkerboard pattern colors for better surface visualization
     const colors = new Float32Array(pointCount * 3);
@@ -592,10 +607,10 @@ function displayPointCloud(data) {
     const color2 = new THREE.Color(0x00cccc); // Slightly darker cyan
 
     for (let i = 0; i < pointCount; i++) {
-        // Checkerboard based on position in array
-        const x = Math.floor(positions[i * 3] / STEP_SIZE);
-        const y = Math.floor(positions[i * 3 + 1] / STEP_SIZE);
-        const isEven = (x + y) % 2 === 0;
+        // Checkerboard based on grid indices (already integers)
+        const gridX = Math.floor(positions[i * 3]);
+        const gridY = Math.floor(positions[i * 3 + 1]);
+        const isEven = (gridX + gridY) % 2 === 0;
         const color = isEven ? color1 : color2;
 
         colors[i * 3] = color.r;
@@ -697,12 +712,18 @@ function displayTool(data) {
 
     console.log('displayTool: terrain max Z:', highestTerrainZ, 'tool min Z:', lowestToolZ, 'offset:', zOffset);
 
-    // Create offset positions
+    // Convert grid indices to world coordinates and apply Z offset
+    // GPU outputs [gridX, gridY, Z] where gridX/gridY are indices
     const offsetPositions = new Float32Array(positions.length);
     for (let i = 0; i < positions.length; i += 3) {
-        offsetPositions[i] = positions[i];     // X
-        offsetPositions[i + 1] = positions[i + 1]; // Y
-        offsetPositions[i + 2] = positions[i + 2] + zOffset; // Z + offset
+        const gridX = positions[i];
+        const gridY = positions[i + 1];
+        const z = positions[i + 2];
+
+        // Convert grid indices to world coordinates
+        offsetPositions[i] = bounds.min.x + gridX * STEP_SIZE;     // X
+        offsetPositions[i + 1] = bounds.min.y + gridY * STEP_SIZE; // Y
+        offsetPositions[i + 2] = z + zOffset;                      // Z + offset
     }
 
     // Create geometry
