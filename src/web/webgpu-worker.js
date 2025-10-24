@@ -1505,50 +1505,37 @@ function stitchToolpathTiles(tileResults, globalBounds, gridStep, xStep, yStep) 
 
         let copiedCount = 0;
 
-        if (use1x1FastPath) {
-            // FAST PATH: 1x1 stepping - copy entire scanlines at once
-            const coreWidth = coreGridEndX - coreGridStartX + 1;
-            const coreHeight = coreGridEndY - coreGridStartY + 1;
+        // Calculate output coordinate ranges for this tile's core
+        // Core region in grid coordinates
+        const coreGridWidth = coreGridEndX - coreGridStartX + 1;
+        const coreGridHeight = coreGridEndY - coreGridStartY + 1;
 
-            for (let y = 0; y < coreHeight; y++) {
-                const globalY = coreGridStartY + y;
-                const tileY = globalY - extGridStartY;
+        // Core region in output coordinates (sampled by xStep/yStep)
+        const coreOutStartX = Math.floor(coreGridStartX / xStep);
+        const coreOutStartY = Math.floor(coreGridStartY / yStep);
+        const coreOutEndX = Math.floor(coreGridEndX / xStep);
+        const coreOutEndY = Math.floor(coreGridEndY / yStep);
+        const coreOutWidth = coreOutEndX - coreOutStartX + 1;
+        const coreOutHeight = coreOutEndY - coreOutStartY + 1;
 
-                if (globalY >= 0 && globalY < globalHeight && tileY >= 0 && tileY < tileResult.numScanlines) {
-                    const globalRowStart = globalY * globalWidth + coreGridStartX;
-                    const tileRowStart = tileY * tileResult.pointsPerLine + (coreGridStartX - extGridStartX);
+        // Tile's extended region start in grid coordinates
+        const extOutStartX = Math.floor(extGridStartX / xStep);
+        const extOutStartY = Math.floor(extGridStartY / yStep);
 
-                    // Bulk copy entire row
-                    result.set(tileData.subarray(tileRowStart, tileRowStart + coreWidth), globalRowStart);
-                    copiedCount += coreWidth;
-                }
-            }
-        } else {
-            // SLOW PATH: Non-1x1 stepping - iterate over cells
-            for (let gridY = coreGridStartY; gridY <= coreGridEndY; gridY++) {
-                if (gridY % yStep !== 0) continue;
+        // Copy entire rows at once (works for all stepping values)
+        for (let outY = 0; outY < coreOutHeight; outY++) {
+            const globalOutY = coreOutStartY + outY;
+            const tileOutY = globalOutY - extOutStartY;
 
-                for (let gridX = coreGridStartX; gridX <= coreGridEndX; gridX++) {
-                    if (gridX % xStep !== 0) continue;
+            if (globalOutY >= 0 && globalOutY < globalNumScanlines &&
+                tileOutY >= 0 && tileOutY < tileResult.numScanlines) {
 
-                    const globalOutX = Math.floor(gridX / xStep);
-                    const globalOutY = Math.floor(gridY / yStep);
+                const globalRowStart = globalOutY * globalPointsPerLine + coreOutStartX;
+                const tileRowStart = tileOutY * tileResult.pointsPerLine + (coreOutStartX - extOutStartX);
 
-                    const tileGridX = gridX - extGridStartX;
-                    const tileGridY = gridY - extGridStartY;
-                    const tileOutX = Math.floor(tileGridX / xStep);
-                    const tileOutY = Math.floor(tileGridY / yStep);
-
-                    if (globalOutX >= 0 && globalOutX < globalPointsPerLine &&
-                        globalOutY >= 0 && globalOutY < globalNumScanlines &&
-                        tileOutX >= 0 && tileOutX < tileResult.pointsPerLine &&
-                        tileOutY >= 0 && tileOutY < tileResult.numScanlines) {
-                        const tileIdx = tileOutY * tileResult.pointsPerLine + tileOutX;
-                        const globalIdx = globalOutY * globalPointsPerLine + globalOutX;
-                        result[globalIdx] = tileData[tileIdx];
-                        copiedCount++;
-                    }
-                }
+                // Bulk copy entire row of output values
+                result.set(tileData.subarray(tileRowStart, tileRowStart + coreOutWidth), globalRowStart);
+                copiedCount += coreOutWidth;
             }
         }
 

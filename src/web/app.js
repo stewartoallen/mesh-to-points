@@ -36,6 +36,7 @@ const yStepInput = document.getElementById('y-step-input');
 const zFloorInput = document.getElementById('z-floor-input');
 const generateToolpathBtn = document.getElementById('generate-toolpath-btn');
 const clearToolpathBtn = document.getElementById('clear-toolpath-btn');
+const showTerrainCheckbox = document.getElementById('show-terrain');
 
 // Timing panel elements
 const timingPanel = document.getElementById('timing-panel');
@@ -1436,6 +1437,14 @@ clearToolpathBtn.addEventListener('click', () => {
         updateStatus('Toolpath cleared');
         clearToolpathBtn.disabled = true;
         // Tool remains visible at its start position
+    }
+});
+
+// Show/hide terrain toggle
+showTerrainCheckbox.addEventListener('change', (e) => {
+    if (pointCloud) {
+        pointCloud.visible = e.target.checked;
+        console.log('Terrain visibility:', e.target.checked);
     }
 });
 
