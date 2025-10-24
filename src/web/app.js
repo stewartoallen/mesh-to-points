@@ -157,8 +157,7 @@ function saveSettings() {
         boundsMaxZ: boundsMaxZ.value,
         xStep: xStepInput.value,
         yStep: yStepInput.value,
-        zFloor: zFloorInput.value,
-        showTerrain: showTerrainCheckbox.checked
+        zFloor: zFloorInput.value
     };
 
     try {
@@ -200,7 +199,6 @@ function loadSettings() {
         if (settings.xStep) xStepInput.value = settings.xStep;
         if (settings.yStep) yStepInput.value = settings.yStep;
         if (settings.zFloor) zFloorInput.value = settings.zFloor;
-        if (settings.showTerrain !== undefined) showTerrainCheckbox.checked = settings.showTerrain;
 
         console.log('Settings restored');
     } catch (e) {
@@ -1529,7 +1527,6 @@ showTerrainCheckbox.addEventListener('change', (e) => {
         pointCloud.visible = e.target.checked;
         console.log('Terrain visibility:', e.target.checked);
     }
-    saveSettings();
 });
 
 // Initialize

@@ -108,13 +108,36 @@ Initialize WebGPU worker. Must be called before processing.
 
 **Returns**: `Promise<boolean>` - Success status
 
-#### `async rasterizeSTL(stlBuffer, stepSize, filterMode)`
-Convert STL to point cloud.
+#### `async rasterizeMesh(triangles, stepSize, filterMode, boundsOverride)`
+Rasterize triangle mesh to height map. Accepts geometry from any source (Three.js, procedural, etc.).
+
+**Parameters**:
+- `triangles` (Float32Array): Unindexed triangle positions (9 floats per triangle: v0.xyz, v1.xyz, v2.xyz)
+- `stepSize` (number): Grid resolution in mm (e.g., 0.5)
+- `filterMode` (number): 0 for max Z (terrain), 1 for min Z (tool)
+- `boundsOverride` (object, optional): Bounding box {min: {x, y, z}, max: {x, y, z}}
+
+**Returns**: `Promise<{positions: Float32Array, pointCount: number, bounds: object}>`
+
+**Example with Three.js**:
+```javascript
+// Get unindexed positions from Three.js geometry
+const geometry = new THREE.BoxGeometry(10, 10, 10);
+const positions = geometry.attributes.position.array;
+
+const result = await converter.rasterizeMesh(
+    positions,
+    0.5,  // step size
+    0     // max Z filter
+);
+```
+
+#### `async rasterizeSTL(stlBuffer, stepSize, filterMode, boundsOverride)`
+Convenience wrapper that parses STL and calls `rasterizeMesh()`.
 
 **Parameters**:
 - `stlBuffer` (ArrayBuffer): Binary STL data
-- `stepSize` (number): Grid resolution in mm (e.g., 0.5)
-- `filterMode` (number): 0 for max Z (terrain), 1 for min Z (tool)
+- Other parameters: Same as `rasterizeMesh()`
 
 **Returns**: `Promise<{positions: Float32Array, pointCount: number, bounds: object}>`
 

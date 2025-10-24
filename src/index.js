@@ -75,20 +75,17 @@ export class RasterPath {
     }
 
     /**
-     * Convert STL buffer to point mesh
-     * @param {ArrayBuffer} stlBuffer - Binary STL data
+     * Rasterize triangle mesh to height map
+     * @param {Float32Array} triangles - Unindexed triangle positions (9 floats per triangle: v0.xyz, v1.xyz, v2.xyz)
      * @param {number} stepSize - Grid resolution (e.g., 0.05)
-     * @param {number} filterMode - 0 for max Z, 1 for min Z
+     * @param {number} filterMode - 0 for max Z (terrain), 1 for min Z (tool)
      * @param {object} boundsOverride - Optional bounding box {min: {x, y, z}, max: {x, y, z}}
      * @returns {Promise<{positions: Float32Array, pointCount: number, bounds: object}>}
      */
-    async rasterizeSTL(stlBuffer, stepSize, filterMode = 0, boundsOverride = null) {
+    async rasterizeMesh(triangles, stepSize, filterMode = 0, boundsOverride = null) {
         if (!this.isInitialized) {
             throw new Error('RasterPath not initialized. Call init() first.');
         }
-
-        // Parse STL to triangles
-        const triangles = this._parseSTL(stlBuffer);
 
         return new Promise((resolve, reject) => {
             const handler = (data) => {
@@ -102,6 +99,22 @@ export class RasterPath {
                 handler
             );
         });
+    }
+
+    /**
+     * Convert STL buffer to point mesh
+     * @param {ArrayBuffer} stlBuffer - Binary STL data
+     * @param {number} stepSize - Grid resolution (e.g., 0.05)
+     * @param {number} filterMode - 0 for max Z (terrain), 1 for min Z (tool)
+     * @param {object} boundsOverride - Optional bounding box {min: {x, y, z}, max: {x, y, z}}
+     * @returns {Promise<{positions: Float32Array, pointCount: number, bounds: object}>}
+     */
+    async rasterizeSTL(stlBuffer, stepSize, filterMode = 0, boundsOverride = null) {
+        // Parse STL to triangles
+        const triangles = this._parseSTL(stlBuffer);
+
+        // Rasterize the mesh
+        return this.rasterizeMesh(triangles, stepSize, filterMode, boundsOverride);
     }
 
     /**
