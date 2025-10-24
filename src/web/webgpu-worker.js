@@ -192,13 +192,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    // Calculate world position for this grid point
+    // Calculate world position for this grid point (center of cell)
     let world_x = uniforms.bounds_min_x + f32(grid_x) * uniforms.step_size;
     let world_y = uniforms.bounds_min_y + f32(grid_y) * uniforms.step_size;
-
-    // Ray from below mesh pointing up (+Z direction)
-    let ray_origin = vec3<f32>(world_x, world_y, uniforms.bounds_min_z - 1.0);
-    let ray_dir = vec3<f32>(0.0, 0.0, 1.0);
 
     // Initialize best_z based on filter mode
     var best_z: f32;
@@ -210,61 +206,88 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var found = false;
 
-    // Find which spatial grid cell this ray belongs to
-    let spatial_cell_x = u32((world_x - uniforms.bounds_min_x) / uniforms.spatial_cell_size);
-    let spatial_cell_y = u32((world_y - uniforms.bounds_min_y) / uniforms.spatial_cell_size);
+    // For tools (filter_mode==1), use 3x3 super-sampling to avoid missing diagonal cells
+    // For terrain (filter_mode==0), single sample at center is fine
+    var num_samples = 1u;
+    if (uniforms.filter_mode == 1u) {
+        num_samples = 9u;  // 3x3 super-sampling for tools
+    }
 
-    // Clamp to spatial grid bounds
-    let clamped_cx = min(spatial_cell_x, uniforms.spatial_grid_width - 1u);
-    let clamped_cy = min(spatial_cell_y, uniforms.spatial_grid_height - 1u);
+    // Super-sampling loop
+    for (var sample_idx = 0u; sample_idx < num_samples; sample_idx++) {
+        var sample_x = world_x;
+        var sample_y = world_y;
 
-    let spatial_cell_idx = clamped_cy * uniforms.spatial_grid_width + clamped_cx;
+        // Offset samples for 3x3 pattern (9 samples)
+        // Pattern: 3x3 grid with step_size/3 spacing
+        if (num_samples == 9u) {
+            let offset = uniforms.step_size / 3.0;
+            let row = sample_idx / 3u;
+            let col = sample_idx % 3u;
+            sample_x += (f32(col) - 1.0) * offset;  // -1, 0, +1
+            sample_y += (f32(row) - 1.0) * offset;  // -1, 0, +1
+        }
 
-    // Get triangle range for this cell
-    let start_idx = spatial_cell_offsets[spatial_cell_idx];
-    let end_idx = spatial_cell_offsets[spatial_cell_idx + 1u];
+        // Ray from below mesh pointing up (+Z direction)
+        let ray_origin = vec3<f32>(sample_x, sample_y, uniforms.bounds_min_z - 1.0);
+        let ray_dir = vec3<f32>(0.0, 0.0, 1.0);
 
-    // Test only triangles in this spatial cell
-    for (var idx = start_idx; idx < end_idx; idx++) {
-        let tri_idx = spatial_triangle_indices[idx];
-        let tri_base = tri_idx * 9u;
+        // Find which spatial grid cell this ray belongs to
+        let spatial_cell_x = u32((sample_x - uniforms.bounds_min_x) / uniforms.spatial_cell_size);
+        let spatial_cell_y = u32((sample_y - uniforms.bounds_min_y) / uniforms.spatial_cell_size);
 
-        let v0 = vec3<f32>(
-            triangles[tri_base],
-            triangles[tri_base + 1u],
-            triangles[tri_base + 2u]
-        );
-        let v1 = vec3<f32>(
-            triangles[tri_base + 3u],
-            triangles[tri_base + 4u],
-            triangles[tri_base + 5u]
-        );
-        let v2 = vec3<f32>(
-            triangles[tri_base + 6u],
-            triangles[tri_base + 7u],
-            triangles[tri_base + 8u]
-        );
+        // Clamp to spatial grid bounds
+        let clamped_cx = min(spatial_cell_x, uniforms.spatial_grid_width - 1u);
+        let clamped_cy = min(spatial_cell_y, uniforms.spatial_grid_height - 1u);
 
-        let result = ray_triangle_intersect(ray_origin, ray_dir, v0, v1, v2);
-        let hit = result.x;
-        let intersection_z = result.y;
+        let spatial_cell_idx = clamped_cy * uniforms.spatial_grid_width + clamped_cx;
 
-        if (hit > 0.5) {
-            if (uniforms.filter_mode == 0u) {
-                // Terrain: keep highest
-                if (intersection_z > best_z) {
-                    best_z = intersection_z;
-                    found = true;
-                }
-            } else {
-                // Tool: keep lowest
-                if (intersection_z < best_z) {
-                    best_z = intersection_z;
-                    found = true;
+        // Get triangle range for this cell
+        let start_idx = spatial_cell_offsets[spatial_cell_idx];
+        let end_idx = spatial_cell_offsets[spatial_cell_idx + 1u];
+
+        // Test only triangles in this spatial cell
+        for (var idx = start_idx; idx < end_idx; idx++) {
+            let tri_idx = spatial_triangle_indices[idx];
+            let tri_base = tri_idx * 9u;
+
+            let v0 = vec3<f32>(
+                triangles[tri_base],
+                triangles[tri_base + 1u],
+                triangles[tri_base + 2u]
+            );
+            let v1 = vec3<f32>(
+                triangles[tri_base + 3u],
+                triangles[tri_base + 4u],
+                triangles[tri_base + 5u]
+            );
+            let v2 = vec3<f32>(
+                triangles[tri_base + 6u],
+                triangles[tri_base + 7u],
+                triangles[tri_base + 8u]
+            );
+
+            let result = ray_triangle_intersect(ray_origin, ray_dir, v0, v1, v2);
+            let hit = result.x;
+            let intersection_z = result.y;
+
+            if (hit > 0.5) {
+                if (uniforms.filter_mode == 0u) {
+                    // Terrain: keep highest
+                    if (intersection_z > best_z) {
+                        best_z = intersection_z;
+                        found = true;
+                    }
+                } else {
+                    // Tool: keep lowest
+                    if (intersection_z < best_z) {
+                        best_z = intersection_z;
+                        found = true;
+                    }
                 }
             }
         }
-    }
+    }  // End of super-sampling loop
 
     // Write output based on filter mode
     let output_idx = grid_y * uniforms.grid_width + grid_x;
