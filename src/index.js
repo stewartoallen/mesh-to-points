@@ -1,9 +1,9 @@
-// stl-to-mesh: STL to Point Mesh converter using WebGPU
+// raster-path: Terrain and Tool Raster Path Finder using WebGPU
 // Main ESM entry point
 
 /**
- * Configuration options for STLToMesh
- * @typedef {Object} STLToMeshConfig
+ * Configuration options for RasterPath
+ * @typedef {Object} RasterPathConfig
  * @property {number} maxGPUMemoryMB - Maximum GPU memory per tile (default: 256MB)
  * @property {number} gpuMemorySafetyMargin - Safety margin as percentage (default: 0.8 = 80%)
  * @property {number} tileOverlapMM - Overlap between tiles in mm for toolpath continuity (default: 10mm)
@@ -12,10 +12,10 @@
  */
 
 /**
- * Main class for STL to mesh conversion using WebGPU
+ * Main class for rasterizing geometry and generating toolpaths using WebGPU
  * Manages WebGPU worker lifecycle and provides async API for conversions
  */
-export class STLToMesh {
+export class RasterPath {
     constructor(config = {}) {
         this.worker = null;
         this.isInitialized = false;
@@ -52,7 +52,7 @@ export class STLToMesh {
                 // Set up message handler
                 this.worker.onmessage = (e) => this._handleMessage(e);
                 this.worker.onerror = (error) => {
-                    console.error('[STLToMesh] Worker error:', error);
+                    console.error('[RasterPath] Worker error:', error);
                     reject(error);
                 };
 
@@ -84,7 +84,7 @@ export class STLToMesh {
      */
     async rasterizeSTL(stlBuffer, stepSize, filterMode = 0, boundsOverride = null) {
         if (!this.isInitialized) {
-            throw new Error('STLToMesh not initialized. Call init() first.');
+            throw new Error('RasterPath not initialized. Call init() first.');
         }
 
         // Parse STL to triangles
@@ -116,7 +116,7 @@ export class STLToMesh {
      */
     async generateToolpath(terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep) {
         if (!this.isInitialized) {
-            throw new Error('STLToMesh not initialized. Call init() first.');
+            throw new Error('RasterPath not initialized. Call init() first.');
         }
 
         return new Promise((resolve, reject) => {

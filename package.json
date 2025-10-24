@@ -20,11 +20,14 @@
     "test:webgpu": "npm run build && electron src/test/electron-test.js"
   },
   "keywords": [
-    "stl",
-    "point-cloud",
-    "mesh",
+    "cnc",
+    "toolpath",
+    "rasterization",
+    "terrain",
     "webgpu",
-    "3d"
+    "stl",
+    "3d",
+    "gpu-accelerated"
   ],
   "author": "",
   "license": "MIT",

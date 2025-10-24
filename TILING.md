@@ -2,7 +2,7 @@
 
 ## Overview
 
-The stl-to-mesh library now includes automatic GPU memory-aware tiling for processing large STL files that would exceed WebGPU buffer limits. The system automatically detects when tiling is needed and processes the mesh in tiles, then stitches the results together seamlessly.
+The raster-path library now includes automatic GPU memory-aware tiling for processing large STL files that would exceed WebGPU buffer limits. The system automatically detects when tiling is needed and processes the mesh in tiles, then stitches the results together seamlessly.
 
 ## Key Features
 
@@ -17,9 +17,9 @@ The stl-to-mesh library now includes automatic GPU memory-aware tiling for proce
 ### ESM API Configuration
 
 ```javascript
-import { STLToMesh } from './src/index.js';
+import { RasterPath } from './src/index.js';
 
-const converter = new STLToMesh({
+const converter = new RasterPath({
     maxGPUMemoryMB: 256,           // Max GPU memory per tile (default: 256MB)
     gpuMemorySafetyMargin: 0.8,    // Safety margin 80% of limit (default: 0.8)
     tileOverlapMM: 10,              // Overlap between tiles for toolpath (default: 10mm)

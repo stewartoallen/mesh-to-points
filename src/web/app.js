@@ -143,7 +143,7 @@ function getBoundsOverride() {
 }
 
 // Settings persistence
-const SETTINGS_KEY = 'stl-to-mesh-settings';
+const SETTINGS_KEY = 'raster-path-settings';
 
 function saveSettings() {
     const settings = {

@@ -1,6 +1,6 @@
-# STL to Mesh - WebGPU Point Cloud & Toolpath Generator
+# Raster Path - WebGPU Toolpath Generator
 
-Fast browser-based STL to point cloud conversion and CNC toolpath generation using WebGPU compute shaders.
+Fast browser-based terrain + tool path generator using WebGPU compute shaders.
 
 ## Features
 
@@ -14,10 +14,10 @@ Fast browser-based STL to point cloud conversion and CNC toolpath generation usi
 ### As a Module
 
 ```javascript
-import { STLToMesh } from 'stl-to-mesh';
+import { RasterPath } from 'raster-path';
 
 // Initialize WebGPU
-const converter = new STLToMesh();
+const converter = new RasterPath();
 await converter.init();
 
 // Load and convert STL
@@ -101,7 +101,7 @@ src/
 
 ## API Reference
 
-### `STLToMesh`
+### `RasterPath`
 
 #### `async init()`
 Initialize WebGPU worker. Must be called before processing.
