@@ -142,6 +142,72 @@ function getBoundsOverride() {
     };
 }
 
+// Settings persistence
+const SETTINGS_KEY = 'stl-to-mesh-settings';
+
+function saveSettings() {
+    const settings = {
+        stepSize: stepSizeSelect.value,
+        useBoundsOverride: useBoundsOverride.checked,
+        boundsMinX: boundsMinX.value,
+        boundsMinY: boundsMinY.value,
+        boundsMinZ: boundsMinZ.value,
+        boundsMaxX: boundsMaxX.value,
+        boundsMaxY: boundsMaxY.value,
+        boundsMaxZ: boundsMaxZ.value,
+        xStep: xStepInput.value,
+        yStep: yStepInput.value,
+        zFloor: zFloorInput.value,
+        showTerrain: showTerrainCheckbox.checked
+    };
+
+    try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+        console.log('Settings saved');
+    } catch (e) {
+        console.warn('Failed to save settings:', e);
+    }
+}
+
+function loadSettings() {
+    try {
+        const saved = localStorage.getItem(SETTINGS_KEY);
+        if (!saved) return;
+
+        const settings = JSON.parse(saved);
+
+        // Restore step size
+        if (settings.stepSize) {
+            stepSizeSelect.value = settings.stepSize;
+            STEP_SIZE = parseFloat(settings.stepSize);
+        }
+
+        // Restore bounds override
+        if (settings.useBoundsOverride !== undefined) {
+            useBoundsOverride.checked = settings.useBoundsOverride;
+            boundsInputsDiv.style.display = settings.useBoundsOverride ? 'block' : 'none';
+        }
+
+        // Restore bounds values
+        if (settings.boundsMinX) boundsMinX.value = settings.boundsMinX;
+        if (settings.boundsMinY) boundsMinY.value = settings.boundsMinY;
+        if (settings.boundsMinZ) boundsMinZ.value = settings.boundsMinZ;
+        if (settings.boundsMaxX) boundsMaxX.value = settings.boundsMaxX;
+        if (settings.boundsMaxY) boundsMaxY.value = settings.boundsMaxY;
+        if (settings.boundsMaxZ) boundsMaxZ.value = settings.boundsMaxZ;
+
+        // Restore toolpath settings
+        if (settings.xStep) xStepInput.value = settings.xStep;
+        if (settings.yStep) yStepInput.value = settings.yStep;
+        if (settings.zFloor) zFloorInput.value = settings.zFloor;
+        if (settings.showTerrain !== undefined) showTerrainCheckbox.checked = settings.showTerrain;
+
+        console.log('Settings restored');
+    } catch (e) {
+        console.warn('Failed to load settings:', e);
+    }
+}
+
 function initScene() {
     // Scene
     scene = new THREE.Scene();
@@ -219,6 +285,7 @@ function initScene() {
     stepSizeSelect.addEventListener('change', (e) => {
         STEP_SIZE = parseFloat(e.target.value);
         console.log('Step size changed to:', STEP_SIZE, 'mm');
+        saveSettings();
     });
 
     // Bounds override checkbox handler
@@ -229,6 +296,7 @@ function initScene() {
         if (e.target.checked && !boundsMinX.value && terrainData && terrainData.bounds) {
             populateBoundsFromTerrain();
         }
+        saveSettings();
     });
 
     // Helper to populate bounds from terrain data
@@ -254,6 +322,7 @@ function initScene() {
             boundsMaxX.value = stlBounds.max.x.toFixed(2);
             boundsMaxY.value = stlBounds.max.y.toFixed(2);
             boundsMaxZ.value = stlBounds.max.z.toFixed(2);
+            saveSettings();
         } else {
             alert('Please load an STL file first');
         }
@@ -296,6 +365,7 @@ function initScene() {
         boundsMaxX.value = (maxX + paddingX).toFixed(2);
         boundsMaxY.value = (maxY + paddingY).toFixed(2);
         boundsMaxZ.value = (maxZ + paddingZ).toFixed(2);
+        saveSettings();
     });
 
     // Recompute button handler
@@ -368,6 +438,19 @@ function initScene() {
             }
         }
     });
+
+    // Save settings when bounds inputs change
+    boundsMinX.addEventListener('blur', saveSettings);
+    boundsMinY.addEventListener('blur', saveSettings);
+    boundsMinZ.addEventListener('blur', saveSettings);
+    boundsMaxX.addEventListener('blur', saveSettings);
+    boundsMaxY.addEventListener('blur', saveSettings);
+    boundsMaxZ.addEventListener('blur', saveSettings);
+
+    // Save settings when toolpath inputs change
+    xStepInput.addEventListener('blur', saveSettings);
+    yStepInput.addEventListener('blur', saveSettings);
+    zFloorInput.addEventListener('blur', saveSettings);
 
     // Start render loop
     animate();
@@ -537,74 +620,6 @@ function handleRasterizeComplete(data, isForTool) {
     // Determine if this is terrain or tool based on parameter
     if (isForTool) {
         toolData = data;
-
-        // DIAGNOSTIC: Inspect tool raster data for diagonal coverage
-        console.log('\n=== TOOL RASTER DIAGNOSTIC ===');
-        const { positions, pointCount, bounds } = data;
-        console.log('Tool points:', pointCount);
-        console.log('Tool bounds:', bounds);
-
-        // Analyze coverage: check if we have points on all diagonals
-        // Tool points are stored as [gridX, gridY, Z] triplets (sparse format)
-        const gridPoints = new Map(); // Key: "x,y" -> Z value
-
-        let minGridX = Infinity, maxGridX = -Infinity;
-        let minGridY = Infinity, maxGridY = -Infinity;
-
-        for (let i = 0; i < positions.length; i += 3) {
-            const gridX = Math.round(positions[i]);
-            const gridY = Math.round(positions[i + 1]);
-            const z = positions[i + 2];
-
-            const key = `${gridX},${gridY}`;
-            gridPoints.set(key, z);
-
-            minGridX = Math.min(minGridX, gridX);
-            maxGridX = Math.max(maxGridX, gridX);
-            minGridY = Math.min(minGridY, gridY);
-            maxGridY = Math.max(maxGridY, gridY);
-        }
-
-        console.log(`Grid extent: X[${minGridX}, ${maxGridX}] Y[${minGridY}, ${maxGridY}]`);
-        console.log(`Grid size: ${maxGridX - minGridX + 1} x ${maxGridY - minGridY + 1}`);
-        console.log(`Expected cells: ${(maxGridX - minGridX + 1) * (maxGridY - minGridY + 1)}`);
-        console.log(`Actual points: ${gridPoints.size}`);
-        console.log(`Coverage: ${(gridPoints.size / ((maxGridX - minGridX + 1) * (maxGridY - minGridY + 1)) * 100).toFixed(1)}%`);
-
-        // Check main diagonal (top-left to bottom-right)
-        console.log('\nChecking main diagonal coverage:');
-        const diagSize = Math.min(maxGridX - minGridX + 1, maxGridY - minGridY + 1);
-        let diagMissing = 0;
-        for (let i = 0; i < diagSize; i++) {
-            const x = minGridX + i;
-            const y = minGridY + i;
-            const key = `${x},${y}`;
-            if (!gridPoints.has(key)) {
-                if (diagMissing < 10) { // Show first 10 missing
-                    console.log(`  Missing: (${x}, ${y})`);
-                }
-                diagMissing++;
-            }
-        }
-        console.log(`Main diagonal: ${diagSize - diagMissing}/${diagSize} present (${diagMissing} missing)`);
-
-        // Check anti-diagonal (top-right to bottom-left)
-        console.log('\nChecking anti-diagonal coverage:');
-        let antiDiagMissing = 0;
-        for (let i = 0; i < diagSize; i++) {
-            const x = maxGridX - i;
-            const y = minGridY + i;
-            const key = `${x},${y}`;
-            if (!gridPoints.has(key)) {
-                if (antiDiagMissing < 10) {
-                    console.log(`  Missing: (${x}, ${y})`);
-                }
-                antiDiagMissing++;
-            }
-        }
-        console.log(`Anti-diagonal: ${diagSize - antiDiagMissing}/${diagSize} present (${antiDiagMissing} missing)`);
-        console.log('=== END DIAGNOSTIC ===\n');
-
         displayTool(data);
         updateStatus('Tool complete');
 
@@ -1514,8 +1529,10 @@ showTerrainCheckbox.addEventListener('change', (e) => {
         pointCloud.visible = e.target.checked;
         console.log('Terrain visibility:', e.target.checked);
     }
+    saveSettings();
 });
 
 // Initialize
 initScene();
 initWorkers();
+loadSettings();

@@ -1,7 +1,7 @@
 {
-  "name": "stl-to-mesh",
-  "version": "2.0.0",
-  "description": "STL to Point Mesh converter using WebGPU",
+  "name": "raster-path",
+  "version": "1.0.0",
+  "description": "Terrain and Tool Raster Path Finder using WebGPU",
   "type": "module",
   "main": "src/index.js",
   "exports": {
