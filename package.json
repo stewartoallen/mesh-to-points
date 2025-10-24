@@ -13,7 +13,9 @@
     "clean": "rm -rf build/",
     "dev": "npm run build && npm run serve -- -p 9090",
     "serve": "npx serve build",
-    "test": "npm run test:webgpu",
+    "test": "npm run test:toolpath",
+    "test:regression": "npm run build && electron src/test/regression-test.cjs",
+    "test:toolpath": "npm run build && electron src/test/toolpath-regression.cjs",
     "test:webgpu": "npm run build && electron src/test/electron-test.js"
   },
   "keywords": [

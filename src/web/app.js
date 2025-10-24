@@ -46,6 +46,8 @@ const memoryTerrainEl = document.getElementById('memory-terrain');
 const memoryToolEl = document.getElementById('memory-tool');
 const memoryToolpathEl = document.getElementById('memory-toolpath');
 const memoryTotalEl = document.getElementById('memory-total');
+const tilingStatusEl = document.getElementById('tiling-status');
+const gpuLimitEl = document.getElementById('gpu-limit');
 
 // Store last loaded file for recompute
 let lastLoadedFile = null;
@@ -67,6 +69,9 @@ let webgpuWorker = null;
 
 // Store STL bounds for bounds override feature
 let stlBounds = null;
+
+// Device capabilities
+let deviceCapabilities = null;
 
 // Timing and memory data
 let timingData = {
@@ -390,7 +395,8 @@ async function initWorkers() {
     const webgpuReady = new Promise((resolve) => {
         webgpuWorker.onmessage = function(e) {
             if (e.data.type === 'webgpu-ready') {
-                resolve(e.data.success);
+                deviceCapabilities = e.data.data.capabilities;
+                resolve(e.data.data.success);
             }
         };
     });
@@ -400,6 +406,11 @@ async function initWorkers() {
 
     // Wait for WebGPU to initialize
     const webgpuAvailable = await webgpuReady;
+
+    // Display device capabilities
+    if (deviceCapabilities) {
+        console.log('WebGPU Device Capabilities:', deviceCapabilities);
+    }
 
     if (!webgpuAvailable) {
         console.error('❌ WebGPU not available - application requires WebGPU support');
@@ -759,6 +770,18 @@ function updateTimingPanel() {
         memoryTotalEl.textContent = formatBytes(performance.memory.usedJSHeapSize);
     } else {
         memoryTotalEl.textContent = 'N/A';
+    }
+
+    // Update GPU / Tiling info
+    if (deviceCapabilities) {
+        gpuLimitEl.textContent = formatBytes(deviceCapabilities.maxStorageBufferBindingSize);
+    }
+
+    // Update tiling status from terrain data
+    if (terrainData && terrainData.tileCount) {
+        tilingStatusEl.textContent = `${terrainData.tileCount} tiles`;
+    } else if (terrainData) {
+        tilingStatusEl.textContent = 'No tiling';
     }
 
     // Show panel if any timing data exists

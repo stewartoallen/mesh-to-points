@@ -8,6 +8,8 @@ let cachedRasterizePipeline = null;
 let cachedRasterizeShaderModule = null;
 let cachedToolpathPipeline = null;
 let cachedToolpathShaderModule = null;
+let config = null;
+let deviceCapabilities = null;
 
 // Initialize WebGPU device in worker context
 async function initWebGPU() {
@@ -62,6 +64,14 @@ async function initWebGPU() {
             layout: 'auto',
             compute: { module: cachedToolpathShaderModule, entryPoint: 'main' },
         });
+
+        // Store device capabilities
+        deviceCapabilities = {
+            maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize,
+            maxBufferSize: device.limits.maxBufferSize,
+            maxComputeWorkgroupSizeX: device.limits.maxComputeWorkgroupSizeX,
+            maxComputeWorkgroupSizeY: device.limits.maxComputeWorkgroupSizeY,
+        };
 
         isInitialized = true;
         console.log('[WebGPU Worker] ✅ Initialized (pipelines cached)');
@@ -928,11 +938,27 @@ self.onmessage = async function(e) {
     try {
         switch (type) {
             case 'init':
+                // Store config
+                config = data?.config || {
+                    maxGPUMemoryMB: 256,
+                    gpuMemorySafetyMargin: 0.8,
+                    tileOverlapMM: 10,
+                    autoTiling: true,
+                    minTileSize: 50
+                };
                 const success = await initWebGPU();
                 self.postMessage({
                     type: 'webgpu-ready',
-                    success
+                    data: {
+                        success,
+                        capabilities: deviceCapabilities
+                    }
                 });
+                break;
+
+            case 'update-config':
+                config = data.config;
+                console.log('[WebGPU Worker] Config updated:', config);
                 break;
 
             case 'rasterize':
