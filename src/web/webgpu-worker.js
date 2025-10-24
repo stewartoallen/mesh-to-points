@@ -157,7 +157,8 @@ fn ray_triangle_intersect(
     // u = f * (s · h)
     let u = f * dot(s, h);
 
-    if (u < 0.0 || u > 1.0) {
+    // Allow small tolerance for edges/vertices to ensure watertight coverage
+    if (u < -EPSILON || u > 1.0 + EPSILON) {
         return vec2<f32>(0.0, 0.0);
     }
 
@@ -167,7 +168,8 @@ fn ray_triangle_intersect(
     // v = f * (ray_dir · q)
     let v = f * dot(ray_dir, q);
 
-    if (v < 0.0 || u + v > 1.0) {
+    // Allow small tolerance for edges/vertices to ensure watertight coverage
+    if (v < -EPSILON || u + v > 1.0 + EPSILON) {
         return vec2<f32>(0.0, 0.0);
     }
 
@@ -206,88 +208,65 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var found = false;
 
-    // For tools (filter_mode==1), use 3x3 super-sampling to avoid missing diagonal cells
-    // For terrain (filter_mode==0), single sample at center is fine
-    var num_samples = 1u;
-    if (uniforms.filter_mode == 1u) {
-        num_samples = 9u;  // 3x3 super-sampling for tools
-    }
+    // Ray from below mesh pointing up (+Z direction)
+    let ray_origin = vec3<f32>(world_x, world_y, uniforms.bounds_min_z - 1.0);
+    let ray_dir = vec3<f32>(0.0, 0.0, 1.0);
 
-    // Super-sampling loop
-    for (var sample_idx = 0u; sample_idx < num_samples; sample_idx++) {
-        var sample_x = world_x;
-        var sample_y = world_y;
+    // Find which spatial grid cell this ray belongs to
+    let spatial_cell_x = u32((world_x - uniforms.bounds_min_x) / uniforms.spatial_cell_size);
+    let spatial_cell_y = u32((world_y - uniforms.bounds_min_y) / uniforms.spatial_cell_size);
 
-        // Offset samples for 3x3 pattern (9 samples)
-        // Pattern: 3x3 grid with step_size/3 spacing
-        if (num_samples == 9u) {
-            let offset = uniforms.step_size / 3.0;
-            let row = sample_idx / 3u;
-            let col = sample_idx % 3u;
-            sample_x += (f32(col) - 1.0) * offset;  // -1, 0, +1
-            sample_y += (f32(row) - 1.0) * offset;  // -1, 0, +1
-        }
+    // Clamp to spatial grid bounds
+    let clamped_cx = min(spatial_cell_x, uniforms.spatial_grid_width - 1u);
+    let clamped_cy = min(spatial_cell_y, uniforms.spatial_grid_height - 1u);
 
-        // Ray from below mesh pointing up (+Z direction)
-        let ray_origin = vec3<f32>(sample_x, sample_y, uniforms.bounds_min_z - 1.0);
-        let ray_dir = vec3<f32>(0.0, 0.0, 1.0);
+    let spatial_cell_idx = clamped_cy * uniforms.spatial_grid_width + clamped_cx;
 
-        // Find which spatial grid cell this ray belongs to
-        let spatial_cell_x = u32((sample_x - uniforms.bounds_min_x) / uniforms.spatial_cell_size);
-        let spatial_cell_y = u32((sample_y - uniforms.bounds_min_y) / uniforms.spatial_cell_size);
+    // Get triangle range for this cell
+    let start_idx = spatial_cell_offsets[spatial_cell_idx];
+    let end_idx = spatial_cell_offsets[spatial_cell_idx + 1u];
 
-        // Clamp to spatial grid bounds
-        let clamped_cx = min(spatial_cell_x, uniforms.spatial_grid_width - 1u);
-        let clamped_cy = min(spatial_cell_y, uniforms.spatial_grid_height - 1u);
+    // Test only triangles in this spatial cell
+    for (var idx = start_idx; idx < end_idx; idx++) {
+        let tri_idx = spatial_triangle_indices[idx];
+        let tri_base = tri_idx * 9u;
 
-        let spatial_cell_idx = clamped_cy * uniforms.spatial_grid_width + clamped_cx;
+        let v0 = vec3<f32>(
+            triangles[tri_base],
+            triangles[tri_base + 1u],
+            triangles[tri_base + 2u]
+        );
+        let v1 = vec3<f32>(
+            triangles[tri_base + 3u],
+            triangles[tri_base + 4u],
+            triangles[tri_base + 5u]
+        );
+        let v2 = vec3<f32>(
+            triangles[tri_base + 6u],
+            triangles[tri_base + 7u],
+            triangles[tri_base + 8u]
+        );
 
-        // Get triangle range for this cell
-        let start_idx = spatial_cell_offsets[spatial_cell_idx];
-        let end_idx = spatial_cell_offsets[spatial_cell_idx + 1u];
+        let result = ray_triangle_intersect(ray_origin, ray_dir, v0, v1, v2);
+        let hit = result.x;
+        let intersection_z = result.y;
 
-        // Test only triangles in this spatial cell
-        for (var idx = start_idx; idx < end_idx; idx++) {
-            let tri_idx = spatial_triangle_indices[idx];
-            let tri_base = tri_idx * 9u;
-
-            let v0 = vec3<f32>(
-                triangles[tri_base],
-                triangles[tri_base + 1u],
-                triangles[tri_base + 2u]
-            );
-            let v1 = vec3<f32>(
-                triangles[tri_base + 3u],
-                triangles[tri_base + 4u],
-                triangles[tri_base + 5u]
-            );
-            let v2 = vec3<f32>(
-                triangles[tri_base + 6u],
-                triangles[tri_base + 7u],
-                triangles[tri_base + 8u]
-            );
-
-            let result = ray_triangle_intersect(ray_origin, ray_dir, v0, v1, v2);
-            let hit = result.x;
-            let intersection_z = result.y;
-
-            if (hit > 0.5) {
-                if (uniforms.filter_mode == 0u) {
-                    // Terrain: keep highest
-                    if (intersection_z > best_z) {
-                        best_z = intersection_z;
-                        found = true;
-                    }
-                } else {
-                    // Tool: keep lowest
-                    if (intersection_z < best_z) {
-                        best_z = intersection_z;
-                        found = true;
-                    }
+        if (hit > 0.5) {
+            if (uniforms.filter_mode == 0u) {
+                // Terrain: keep highest
+                if (intersection_z > best_z) {
+                    best_z = intersection_z;
+                    found = true;
+                }
+            } else {
+                // Tool: keep lowest
+                if (intersection_z < best_z) {
+                    best_z = intersection_z;
+                    found = true;
                 }
             }
         }
-    }  // End of super-sampling loop
+    }
 
     // Write output based on filter mode
     let output_idx = grid_y * uniforms.grid_width + grid_x;
