@@ -263,10 +263,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
     }
 
-    // Write output
+    // Write output (X/Y as grid indices, not world coordinates)
     let output_idx = grid_y * uniforms.grid_width + grid_x;
-    output_points[output_idx * 3u] = world_x;
-    output_points[output_idx * 3u + 1u] = world_y;
+    output_points[output_idx * 3u] = f32(grid_x);
+    output_points[output_idx * 3u + 1u] = f32(grid_y);
     output_points[output_idx * 3u + 2u] = best_z;
 
     if (found) {
@@ -781,52 +781,57 @@ async function rasterizeMesh(triangles, stepSize, filterMode, boundsOverride = n
 }
 
 // Helper: Create height map from point cloud
+// Points come from GPU as [gridX, gridY, Z] - grid indices for X/Y
 function createHeightMapFromPoints(points, gridStep, bounds = null) {
-    // If bounds provided, use them; otherwise calculate from points
-    let minX, minY, minZ, maxX, maxY, maxZ;
+    // Calculate grid dimensions from bounds
+    let width, height, minX, minY, minZ, maxX, maxY, maxZ;
 
     if (bounds) {
-        // Use provided bounds (e.g., from rasterization with bounds override)
+        // Use provided bounds to calculate grid dimensions
         minX = bounds.min.x;
         minY = bounds.min.y;
         minZ = bounds.min.z;
         maxX = bounds.max.x;
         maxY = bounds.max.y;
         maxZ = bounds.max.z;
+        width = Math.ceil((maxX - minX) / gridStep) + 1;
+        height = Math.ceil((maxY - minY) / gridStep) + 1;
     } else {
-        // Calculate bounds from points
+        // Calculate bounds from points (points are grid indices for X/Y)
         if (!points || points.length === 0) {
             throw new Error('No points provided and no bounds specified');
         }
 
-        minX = Infinity; minY = Infinity; minZ = Infinity;
-        maxX = -Infinity; maxY = -Infinity; maxZ = -Infinity;
+        let minGridX = Infinity, minGridY = Infinity;
+        let maxGridX = -Infinity, maxGridY = -Infinity;
+        minZ = Infinity;
+        maxZ = -Infinity;
 
         for (let i = 0; i < points.length; i += 3) {
-            minX = Math.min(minX, points[i]);
-            maxX = Math.max(maxX, points[i]);
-            minY = Math.min(minY, points[i + 1]);
-            maxY = Math.max(maxY, points[i + 1]);
+            minGridX = Math.min(minGridX, points[i]);
+            maxGridX = Math.max(maxGridX, points[i]);
+            minGridY = Math.min(minGridY, points[i + 1]);
+            maxGridY = Math.max(maxGridY, points[i + 1]);
             minZ = Math.min(minZ, points[i + 2]);
             maxZ = Math.max(maxZ, points[i + 2]);
         }
+
+        width = Math.floor(maxGridX) + 1;
+        height = Math.floor(maxGridY) + 1;
+        // For bounds reporting (convert back to world coords)
+        minX = 0; maxX = (width - 1) * gridStep;
+        minY = 0; maxY = (height - 1) * gridStep;
     }
 
-    // Calculate grid dimensions
-    const width = Math.ceil((maxX - minX) / gridStep) + 1;
-    const height = Math.ceil((maxY - minY) / gridStep) + 1;
     const grid = new Float32Array(width * height);
     grid.fill(NaN); // Initialize with NaN
 
-    // Fill grid with point data (if any points exist)
+    // Fill grid with point data (points are [gridX, gridY, Z])
     if (points && points.length > 0) {
         for (let i = 0; i < points.length; i += 3) {
-            const x = points[i];
-            const y = points[i + 1];
+            const gridX = Math.floor(points[i]);      // Grid index
+            const gridY = Math.floor(points[i + 1]);  // Grid index
             const z = points[i + 2];
-
-            const gridX = Math.floor((x - minX) / gridStep);
-            const gridY = Math.floor((y - minY) / gridStep);
 
             // Bounds check
             if (gridX >= 0 && gridX < width && gridY >= 0 && gridY < height) {
@@ -854,40 +859,48 @@ function createHeightMapFromPoints(points, gridStep, bounds = null) {
 }
 
 // Helper: Create sparse tool representation
+// Points come from GPU as [gridX, gridY, Z] - pure integer grid coordinates for X/Y
 function createSparseToolFromPoints(points, gridStep) {
     if (!points || points.length === 0) {
         throw new Error('No tool points provided');
     }
 
-    // Find tool reference point (minimum Z = tool tip)
-    let minZ = Infinity;
-    for (let i = 2; i < points.length; i += 3) {
-        minZ = Math.min(minZ, points[i]);
-    }
+    // Points are [gridX, gridY, Z] where gridX/gridY are grid indices (floats but integer values)
+    // Find bounds in grid space and tool tip Z
+    let minGridX = Infinity, minGridY = Infinity, minZ = Infinity;
+    let maxGridX = -Infinity, maxGridY = -Infinity;
 
-    // Find tool bounds for offset calculation
-    let minX = Infinity, minY = Infinity;
-    let maxX = -Infinity, maxY = -Infinity;
     for (let i = 0; i < points.length; i += 3) {
-        minX = Math.min(minX, points[i]);
-        maxX = Math.max(maxX, points[i]);
-        minY = Math.min(minY, points[i + 1]);
-        maxY = Math.max(maxY, points[i + 1]);
+        const gridX = points[i];      // Already a grid index
+        const gridY = points[i + 1];  // Already a grid index
+        const z = points[i + 2];
+
+        minGridX = Math.min(minGridX, gridX);
+        maxGridX = Math.max(maxGridX, gridX);
+        minGridY = Math.min(minGridY, gridY);
+        maxGridY = Math.max(maxGridY, gridY);
+        minZ = Math.min(minZ, z);
     }
 
-    // Create offset-based sparse representation
+    // Calculate tool center in grid coordinates (pure integer)
+    const width = Math.floor(maxGridX - minGridX) + 1;
+    const height = Math.floor(maxGridY - minGridY) + 1;
+    const centerX = Math.floor(minGridX) + Math.floor(width / 2);
+    const centerY = Math.floor(minGridY) + Math.floor(height / 2);
+
+    // Convert each point to offset from center (integer arithmetic only)
     const xOffsets = [];
     const yOffsets = [];
     const zValues = [];
 
     for (let i = 0; i < points.length; i += 3) {
-        const x = points[i];
-        const y = points[i + 1];
+        const gridX = Math.floor(points[i]);      // Grid index (ensure integer)
+        const gridY = Math.floor(points[i + 1]);  // Grid index (ensure integer)
         const z = points[i + 2];
 
-        // Calculate integer offsets from tool center (in grid units)
-        const xOffset = Math.round((x - minX - (maxX - minX) / 2) / gridStep);
-        const yOffset = Math.round((y - minY - (maxY - minY) / 2) / gridStep);
+        // Calculate offset from tool center (pure integer arithmetic)
+        const xOffset = gridX - centerX;
+        const yOffset = gridY - centerY;
         const zValue = z - minZ; // Z relative to tool tip
 
         xOffsets.push(xOffset);
