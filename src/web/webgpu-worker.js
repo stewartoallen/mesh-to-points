@@ -718,13 +718,44 @@ function createTiles(bounds, stepSize, maxMemoryBytes) {
 }
 
 // Stitch point clouds from multiple tiles
-function stitchTiles(tileResults, fullBounds) {
+function stitchTiles(tileResults, fullBounds, stepSize) {
     if (tileResults.length === 0) {
         throw new Error('No tile results to stitch');
     }
 
     if (tileResults.length === 1) {
-        return tileResults[0];
+        // Single tile - but still need to convert to global coordinate system
+        const result = tileResults[0];
+        if (!result.tileBounds) {
+            return result; // Already in global coords
+        }
+
+        // Convert tile-local grid indices to global grid indices
+        const positions = result.positions;
+        const globalPositions = new Float32Array(positions.length);
+
+        // Calculate offset from tile origin to global origin (in grid cells)
+        const tileOffsetX = Math.round((result.tileBounds.min.x - fullBounds.min.x) / stepSize);
+        const tileOffsetY = Math.round((result.tileBounds.min.y - fullBounds.min.y) / stepSize);
+
+        for (let i = 0; i < positions.length; i += 3) {
+            const localGridX = positions[i];
+            const localGridY = positions[i + 1];
+            const z = positions[i + 2];
+
+            // Convert local grid indices to global grid indices
+            globalPositions[i] = localGridX + tileOffsetX;
+            globalPositions[i + 1] = localGridY + tileOffsetY;
+            globalPositions[i + 2] = z;
+        }
+
+        return {
+            positions: globalPositions,
+            pointCount: result.pointCount,
+            bounds: fullBounds,
+            conversionTime: result.conversionTime,
+            tileCount: 1
+        };
     }
 
     // Calculate total points
@@ -735,13 +766,28 @@ function stitchTiles(tileResults, fullBounds) {
 
     console.log(`[WebGPU Worker] Stitching ${tileResults.length} tiles with ${totalPoints} total points`);
 
-    // Combine all points
+    // Combine all points, converting from tile-local to global grid coordinates
     const allPositions = new Float32Array(totalPoints * 3);
-    let offset = 0;
+    let writeOffset = 0;
 
     for (const result of tileResults) {
-        allPositions.set(result.positions, offset);
-        offset += result.positions.length;
+        const positions = result.positions;
+
+        // Calculate offset from tile origin to global origin (in grid cells)
+        const tileOffsetX = Math.round((result.tileBounds.min.x - fullBounds.min.x) / stepSize);
+        const tileOffsetY = Math.round((result.tileBounds.min.y - fullBounds.min.y) / stepSize);
+
+        // Convert each point from tile-local to global grid coordinates
+        for (let i = 0; i < positions.length; i += 3) {
+            const localGridX = positions[i];
+            const localGridY = positions[i + 1];
+            const z = positions[i + 2];
+
+            // Convert local grid indices to global grid indices
+            allPositions[writeOffset++] = localGridX + tileOffsetX;
+            allPositions[writeOffset++] = localGridY + tileOffsetY;
+            allPositions[writeOffset++] = z;
+        }
     }
 
     return {
@@ -795,11 +841,13 @@ async function rasterizeMesh(triangles, stepSize, filterMode, boundsOverride = n
         for (let i = 0; i < tiles.length; i++) {
             console.log(`[WebGPU Worker] Processing tile ${i + 1}/${tiles.length}`);
             const tileResult = await rasterizeMeshSingle(triangles, stepSize, filterMode, tiles[i].bounds);
+            // Store tile bounds with result for coordinate conversion during stitching
+            tileResult.tileBounds = tiles[i].bounds;
             tileResults.push(tileResult);
         }
 
-        // Stitch tiles together
-        return stitchTiles(tileResults, bounds);
+        // Stitch tiles together (pass full bounds and step size for coordinate conversion)
+        return stitchTiles(tileResults, bounds, stepSize);
     } else {
         // Single-pass rasterization
         return await rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverride);
