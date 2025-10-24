@@ -56,7 +56,19 @@ function createWindow() {
                     };
                 });
 
-                worker.postMessage({ type: 'init' });
+                // Use normal GPU limit - don't force tiling for baseline test
+                worker.postMessage({
+                    type: 'init',
+                    data: {
+                        config: {
+                            maxGPUMemoryMB: 256,  // Normal limit - no tiling needed
+                            gpuMemorySafetyMargin: 0.8,
+                            tileOverlapMM: 10,
+                            autoTiling: true,
+                            minTileSize: 50
+                        }
+                    }
+                });
                 const ready = await workerReady;
 
                 if (!ready) {

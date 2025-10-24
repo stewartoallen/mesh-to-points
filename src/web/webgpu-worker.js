@@ -444,7 +444,8 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
 }
 
 // Rasterize mesh to point cloud
-async function rasterizeMesh(triangles, stepSize, filterMode, boundsOverride = null) {
+// Internal function - rasterize without tiling (do not modify this function!)
+async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverride = null) {
     const startTime = performance.now();
 
     if (!isInitialized) {
@@ -655,6 +656,130 @@ async function rasterizeMesh(triangles, stepSize, filterMode, boundsOverride = n
     };
 }
 
+// Create tiles for tiled rasterization
+function createTiles(bounds, stepSize, maxMemoryBytes) {
+    const width = bounds.max.x - bounds.min.x;
+    const height = bounds.max.y - bounds.min.y;
+
+    // Binary search for optimal tile dimension
+    let low = config.minTileSize;
+    let high = Math.max(width, height);
+    let bestTileDim = high;
+
+    while (low <= high) {
+        const mid = (low + high) / 2;
+        const gridW = Math.ceil(mid / stepSize);
+        const gridH = Math.ceil(mid / stepSize);
+        const memoryNeeded = gridW * gridH * 4 * 4; // output + mask
+
+        if (memoryNeeded <= maxMemoryBytes) {
+            bestTileDim = mid;
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    const tilesX = Math.ceil(width / bestTileDim);
+    const tilesY = Math.ceil(height / bestTileDim);
+    const actualTileWidth = width / tilesX;
+    const actualTileHeight = height / tilesY;
+
+    console.log(`[WebGPU Worker] Creating ${tilesX}x${tilesY} = ${tilesX * tilesY} tiles (${actualTileWidth.toFixed(2)}mm × ${actualTileHeight.toFixed(2)}mm each)`);
+
+    const tiles = [];
+    const overlap = stepSize * 2; // Overlap by 2 grid cells to ensure no gaps
+
+    for (let ty = 0; ty < tilesY; ty++) {
+        for (let tx = 0; tx < tilesX; tx++) {
+            // Calculate base tile bounds
+            let tileMinX = bounds.min.x + (tx * actualTileWidth);
+            let tileMinY = bounds.min.y + (ty * actualTileHeight);
+            let tileMaxX = Math.min(bounds.max.x, tileMinX + actualTileWidth);
+            let tileMaxY = Math.min(bounds.max.y, tileMinY + actualTileHeight);
+
+            // Extend bounds by overlap (except at outer edges)
+            if (tx > 0) tileMinX -= overlap;
+            if (ty > 0) tileMinY -= overlap;
+            if (tx < tilesX - 1) tileMaxX += overlap;
+            if (ty < tilesY - 1) tileMaxY += overlap;
+
+            tiles.push({
+                id: `tile_${tx}_${ty}`,
+                bounds: {
+                    min: { x: tileMinX, y: tileMinY, z: bounds.min.z },
+                    max: { x: tileMaxX, y: tileMaxY, z: bounds.max.z }
+                }
+            });
+        }
+    }
+
+    return { tiles, tilesX, tilesY };
+}
+
+// Stitch point clouds from multiple tiles
+function stitchTiles(tileResults, fullBounds) {
+    if (tileResults.length === 0) {
+        throw new Error('No tile results to stitch');
+    }
+
+    if (tileResults.length === 1) {
+        return tileResults[0];
+    }
+
+    // Calculate total points
+    let totalPoints = 0;
+    for (const result of tileResults) {
+        totalPoints += result.pointCount;
+    }
+
+    console.log(`[WebGPU Worker] Stitching ${tileResults.length} tiles with ${totalPoints} total points`);
+
+    // Combine all points
+    const allPositions = new Float32Array(totalPoints * 3);
+    let offset = 0;
+
+    for (const result of tileResults) {
+        allPositions.set(result.positions, offset);
+        offset += result.positions.length;
+    }
+
+    return {
+        positions: allPositions,
+        pointCount: totalPoints,
+        bounds: fullBounds,
+        conversionTime: tileResults.reduce((sum, r) => sum + (r.conversionTime || 0), 0),
+        tileCount: tileResults.length
+    };
+}
+
+// Check if tiling is needed
+function shouldUseTiling(bounds, stepSize) {
+    if (!config || !config.autoTiling) return false;
+    if (!deviceCapabilities) return false;
+
+    const gridWidth = Math.ceil((bounds.max.x - bounds.min.x) / stepSize) + 1;
+    const gridHeight = Math.ceil((bounds.max.y - bounds.min.y) / stepSize) + 1;
+    const totalPoints = gridWidth * gridHeight;
+
+    const gpuOutputBuffer = totalPoints * 3 * 4;
+    const gpuMaskBuffer = totalPoints * 4;
+    const totalGPUMemory = gpuOutputBuffer + gpuMaskBuffer;
+
+    // Use the smaller of configured limit or device capability
+    const configuredLimit = config.maxGPUMemoryMB * 1024 * 1024;
+    const deviceLimit = deviceCapabilities.maxStorageBufferBindingSize;
+    const maxSafeSize = Math.min(configuredLimit, deviceLimit) * config.gpuMemorySafetyMargin;
+
+    return totalGPUMemory > maxSafeSize;
+}
+
+// Rasterize mesh - wrapper that will be used for potential tiling at toolpath stage
+async function rasterizeMesh(triangles, stepSize, filterMode, boundsOverride = null) {
+    // Just use single-pass for now - tiling happens at toolpath generation stage
+    return await rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverride);
+}
+
 // Helper: Create height map from point cloud
 function createHeightMapFromPoints(points, gridStep, bounds = null) {
     // If bounds provided, use them; otherwise calculate from points
@@ -779,8 +904,8 @@ function createSparseToolFromPoints(points, gridStep) {
     };
 }
 
-// Generate toolpath using pure WebGPU
-async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds = null) {
+// Generate toolpath for a single region (internal)
+async function generateToolpathSingle(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds = null) {
     const startTime = performance.now();
     console.log('[WebGPU Worker] Generating toolpath...');
     console.log(`[WebGPU Worker] Input: terrain ${terrainPoints.length/3} points, tool ${toolPoints.length/3} points, steps (${xStep}, ${yStep}), oobZ ${oobZ}, gridStep ${gridStep}`);
@@ -928,6 +1053,263 @@ async function runToolpathCompute(terrainMapData, sparseToolData, xStep, yStep, 
         numScanlines,
         pointsPerLine,
         generationTime: endTime - startTime
+    };
+}
+
+// Generate toolpath with tiling support (public API)
+async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds = null) {
+    // Calculate bounds if not provided
+    if (!terrainBounds) {
+        let minX = Infinity, minY = Infinity, minZ = Infinity;
+        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+        for (let i = 0; i < terrainPoints.length; i += 3) {
+            minX = Math.min(minX, terrainPoints[i]);
+            maxX = Math.max(maxX, terrainPoints[i]);
+            minY = Math.min(minY, terrainPoints[i + 1]);
+            maxY = Math.max(maxY, terrainPoints[i + 1]);
+            minZ = Math.min(minZ, terrainPoints[i + 2]);
+            maxZ = Math.max(maxZ, terrainPoints[i + 2]);
+        }
+        terrainBounds = {
+            min: { x: minX, y: minY, z: minZ },
+            max: { x: maxX, y: maxY, z: maxZ }
+        };
+    }
+
+    // Calculate tool dimensions for overlap
+    let toolMinX = Infinity, toolMaxX = -Infinity;
+    let toolMinY = Infinity, toolMaxY = -Infinity;
+    for (let i = 0; i < toolPoints.length; i += 3) {
+        toolMinX = Math.min(toolMinX, toolPoints[i]);
+        toolMaxX = Math.max(toolMaxX, toolPoints[i]);
+        toolMinY = Math.min(toolMinY, toolPoints[i + 1]);
+        toolMaxY = Math.max(toolMaxY, toolPoints[i + 1]);
+    }
+    const toolWidth = toolMaxX - toolMinX;
+    const toolHeight = toolMaxY - toolMinY;
+
+    // Check if tiling is needed based on output grid size
+    const outputWidth = Math.ceil((terrainBounds.max.x - terrainBounds.min.x) / gridStep) + 1;
+    const outputHeight = Math.ceil((terrainBounds.max.y - terrainBounds.min.y) / gridStep) + 1;
+    const outputPoints = Math.ceil(outputWidth / xStep) * Math.ceil(outputHeight / yStep);
+    const outputMemory = outputPoints * 4; // 4 bytes per float
+
+    const configuredLimit = config.maxGPUMemoryMB * 1024 * 1024;
+    const deviceLimit = deviceCapabilities.maxStorageBufferBindingSize;
+    const maxSafeSize = Math.min(configuredLimit, deviceLimit) * config.gpuMemorySafetyMargin;
+
+    if (outputMemory <= maxSafeSize) {
+        // No tiling needed
+        return await generateToolpathSingle(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds);
+    }
+
+    // Tiling needed
+    console.log('[WebGPU Worker] 🔲 Using tiled toolpath generation');
+    console.log(`[WebGPU Worker] Tool dimensions: ${toolWidth.toFixed(2)}mm × ${toolHeight.toFixed(2)}mm`);
+
+    // Create tiles with tool-size overlap
+    const tiles = createToolpathTiles(terrainBounds, gridStep, xStep, yStep, toolWidth, toolHeight, maxSafeSize);
+    console.log(`[WebGPU Worker] Created ${tiles.length} tiles`);
+
+    // Process each tile
+    const tileResults = [];
+    for (let i = 0; i < tiles.length; i++) {
+        const tile = tiles[i];
+        console.log(`[WebGPU Worker] Processing tile ${i + 1}/${tiles.length}...`);
+
+        // Filter terrain points to this tile's bounds
+        const tileTerrainPoints = [];
+        for (let j = 0; j < terrainPoints.length; j += 3) {
+            const x = terrainPoints[j];
+            const y = terrainPoints[j + 1];
+            const z = terrainPoints[j + 2];
+            if (x >= tile.bounds.min.x && x <= tile.bounds.max.x &&
+                y >= tile.bounds.min.y && y <= tile.bounds.max.y) {
+                tileTerrainPoints.push(x, y, z);
+            }
+        }
+
+        // Generate toolpath for this tile
+        const tileToolpathResult = await generateToolpathSingle(
+            new Float32Array(tileTerrainPoints),
+            toolPoints,
+            xStep,
+            yStep,
+            oobZ,
+            gridStep,
+            tile.bounds
+        );
+
+        tileResults.push({
+            pathData: tileToolpathResult.pathData,
+            numScanlines: tileToolpathResult.numScanlines,
+            pointsPerLine: tileToolpathResult.pointsPerLine,
+            tile: tile
+        });
+
+        console.log(`[WebGPU Worker] Tile ${i + 1}/${tiles.length} complete: ${tileToolpathResult.numScanlines}×${tileToolpathResult.pointsPerLine}`);
+    }
+
+    // Stitch tiles together, dropping overlap regions
+    const stitchedResult = stitchToolpathTiles(tileResults, terrainBounds, gridStep, xStep, yStep);
+    console.log(`[WebGPU Worker] ✅ Tiled toolpath complete: ${stitchedResult.numScanlines}×${stitchedResult.pointsPerLine}`);
+
+    return stitchedResult;
+}
+
+// Create tiles for toolpath generation with overlap (using integer grid coordinates)
+function createToolpathTiles(bounds, gridStep, xStep, yStep, toolWidth, toolHeight, maxMemoryBytes) {
+    // Calculate global grid dimensions
+    const globalGridWidth = Math.ceil((bounds.max.x - bounds.min.x) / gridStep) + 1;
+    const globalGridHeight = Math.ceil((bounds.max.y - bounds.min.y) / gridStep) + 1;
+
+    // Calculate tool overlap in grid cells
+    const toolOverlapX = Math.ceil(toolWidth / gridStep);
+    const toolOverlapY = Math.ceil(toolHeight / gridStep);
+
+    // Binary search for optimal tile size in grid cells
+    let low = Math.max(toolOverlapX, toolOverlapY) * 2; // At least 2x tool size
+    let high = Math.max(globalGridWidth, globalGridHeight);
+    let bestTileGridSize = high;
+
+    while (low <= high) {
+        const mid = Math.floor((low + high) / 2);
+        const outputW = Math.ceil(mid / xStep);
+        const outputH = Math.ceil(mid / yStep);
+        const memoryNeeded = outputW * outputH * 4;
+
+        if (memoryNeeded <= maxMemoryBytes) {
+            bestTileGridSize = mid;
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    const tilesX = Math.ceil(globalGridWidth / bestTileGridSize);
+    const tilesY = Math.ceil(globalGridHeight / bestTileGridSize);
+    const coreGridWidth = Math.ceil(globalGridWidth / tilesX);
+    const coreGridHeight = Math.ceil(globalGridHeight / tilesY);
+
+    console.log(`[WebGPU Worker] Creating ${tilesX}×${tilesY} tiles (${coreGridWidth}×${coreGridHeight} cells core + ${toolOverlapX}×${toolOverlapY} cells overlap)`);
+
+    const tiles = [];
+    for (let ty = 0; ty < tilesY; ty++) {
+        for (let tx = 0; tx < tilesX; tx++) {
+            // Core tile in grid coordinates
+            const coreGridStartX = tx * coreGridWidth;
+            const coreGridStartY = ty * coreGridHeight;
+            const coreGridEndX = Math.min((tx + 1) * coreGridWidth, globalGridWidth) - 1;
+            const coreGridEndY = Math.min((ty + 1) * coreGridHeight, globalGridHeight) - 1;
+
+            // Extended tile with overlap in grid coordinates
+            let extGridStartX = coreGridStartX;
+            let extGridStartY = coreGridStartY;
+            let extGridEndX = coreGridEndX;
+            let extGridEndY = coreGridEndY;
+
+            // Add overlap on sides that aren't at global boundary
+            if (tx > 0) extGridStartX -= toolOverlapX;
+            if (ty > 0) extGridStartY -= toolOverlapY;
+            if (tx < tilesX - 1) extGridEndX += toolOverlapX;
+            if (ty < tilesY - 1) extGridEndY += toolOverlapY;
+
+            // Clamp to global bounds
+            extGridStartX = Math.max(0, extGridStartX);
+            extGridStartY = Math.max(0, extGridStartY);
+            extGridEndX = Math.min(globalGridWidth - 1, extGridEndX);
+            extGridEndY = Math.min(globalGridHeight - 1, extGridEndY);
+
+            // Convert grid coordinates to world coordinates
+            const extMinX = bounds.min.x + extGridStartX * gridStep;
+            const extMinY = bounds.min.y + extGridStartY * gridStep;
+            const extMaxX = bounds.min.x + extGridEndX * gridStep;
+            const extMaxY = bounds.min.y + extGridEndY * gridStep;
+
+            const coreMinX = bounds.min.x + coreGridStartX * gridStep;
+            const coreMinY = bounds.min.y + coreGridStartY * gridStep;
+            const coreMaxX = bounds.min.x + coreGridEndX * gridStep;
+            const coreMaxY = bounds.min.y + coreGridEndY * gridStep;
+
+            tiles.push({
+                id: `tile_${tx}_${ty}`,
+                tx, ty,
+                tilesX, tilesY,
+                bounds: {
+                    min: { x: extMinX, y: extMinY, z: bounds.min.z },
+                    max: { x: extMaxX, y: extMaxY, z: bounds.max.z }
+                },
+                core: {
+                    gridStart: { x: coreGridStartX, y: coreGridStartY },
+                    gridEnd: { x: coreGridEndX, y: coreGridEndY },
+                    min: { x: coreMinX, y: coreMinY },
+                    max: { x: coreMaxX, y: coreMaxY }
+                }
+            });
+        }
+    }
+
+    return tiles;
+}
+
+// Stitch toolpath tiles together, dropping overlap regions (using integer grid coordinates)
+function stitchToolpathTiles(tileResults, globalBounds, gridStep, xStep, yStep) {
+    // Calculate global output dimensions
+    const globalWidth = Math.ceil((globalBounds.max.x - globalBounds.min.x) / gridStep) + 1;
+    const globalHeight = Math.ceil((globalBounds.max.y - globalBounds.min.y) / gridStep) + 1;
+    const globalPointsPerLine = Math.ceil(globalWidth / xStep);
+    const globalNumScanlines = Math.ceil(globalHeight / yStep);
+
+    const result = new Float32Array(globalPointsPerLine * globalNumScanlines);
+    result.fill(NaN);
+
+    for (const tileResult of tileResults) {
+        const tile = tileResult.tile;
+        const tileData = tileResult.pathData;
+
+        // Use the pre-calculated integer grid coordinates from tile.core
+        const coreGridStartX = tile.core.gridStart.x;
+        const coreGridStartY = tile.core.gridStart.y;
+        const coreGridEndX = tile.core.gridEnd.x;
+        const coreGridEndY = tile.core.gridEnd.y;
+
+        // Calculate tile's extended grid coordinates
+        const extGridStartX = Math.round((tile.bounds.min.x - globalBounds.min.x) / gridStep);
+        const extGridStartY = Math.round((tile.bounds.min.y - globalBounds.min.y) / gridStep);
+
+        // For each grid cell in the core region
+        for (let gridY = coreGridStartY; gridY <= coreGridEndY; gridY++) {
+            for (let gridX = coreGridStartX; gridX <= coreGridEndX; gridX++) {
+                // Convert grid cell to output cell (with xStep/yStep)
+                if (gridX % xStep === 0 && gridY % yStep === 0) {
+                    const globalOutX = gridX / xStep;
+                    const globalOutY = gridY / yStep;
+
+                    // Calculate corresponding position in tile's output
+                    const tileGridX = gridX - extGridStartX;
+                    const tileGridY = gridY - extGridStartY;
+                    const tileOutX = Math.floor(tileGridX / xStep);
+                    const tileOutY = Math.floor(tileGridY / yStep);
+
+                    // Check bounds and copy
+                    if (globalOutX >= 0 && globalOutX < globalPointsPerLine &&
+                        globalOutY >= 0 && globalOutY < globalNumScanlines &&
+                        tileOutX >= 0 && tileOutX < tileResult.pointsPerLine &&
+                        tileOutY >= 0 && tileOutY < tileResult.numScanlines) {
+                        const tileIdx = tileOutY * tileResult.pointsPerLine + tileOutX;
+                        const globalIdx = globalOutY * globalPointsPerLine + globalOutX;
+                        result[globalIdx] = tileData[tileIdx];
+                    }
+                }
+            }
+        }
+    }
+
+    return {
+        pathData: result,
+        numScanlines: globalNumScanlines,
+        pointsPerLine: globalPointsPerLine,
+        generationTime: 0 // Sum from tiles if needed
     };
 }
 
