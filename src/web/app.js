@@ -215,6 +215,15 @@ function loadSettings() {
             }
         }
 
+        // Set Z floor default based on mode if not explicitly saved
+        if (!settings.zFloor) {
+            if (toolpathMode === 'radial') {
+                zFloorInput.value = '0';
+            } else {
+                zFloorInput.value = '-100';
+            }
+        }
+
         // Restore bounds override
         if (settings.useBoundsOverride !== undefined) {
             useBoundsOverride.checked = settings.useBoundsOverride;
@@ -1882,15 +1891,26 @@ toolpathModeRadios.forEach(radio => {
         toolpathMode = e.target.value;
         console.log('Toolpath mode switched to:', toolpathMode);
 
-        // Update label based on mode
+        // Update label and controls based on mode
         if (toolpathMode === 'radial') {
             showTerrainLabel.textContent = 'Show Model';
             yStepControl.style.display = 'none';
             xRotationStepControl.style.display = 'flex';
+
+            // Set Z floor to 0 (at X axis) for radial mode
+            // User can set negative to reach pockets below centerline
+            if (zFloorInput.value === '-100') {
+                zFloorInput.value = '0';
+            }
         } else {
             showTerrainLabel.textContent = 'Show Terrain';
             yStepControl.style.display = 'flex';
             xRotationStepControl.style.display = 'none';
+
+            // Set Z floor to -100 (well below part) for planar mode
+            if (zFloorInput.value === '0') {
+                zFloorInput.value = '-100';
+            }
         }
 
         // Clear existing displays
