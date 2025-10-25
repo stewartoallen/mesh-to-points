@@ -210,6 +210,11 @@ export class RasterPath {
                 }
             };
 
+            if (i === 0) {
+                console.log(`Strip bounds for rotation ${angle}°:`, stripBounds);
+                console.log(`  X range: ${stripBounds.min.x.toFixed(2)} to ${stripBounds.max.x.toFixed(2)} (width: ${(stripBounds.max.x - stripBounds.min.x).toFixed(2)}mm)`);
+            }
+
             // 3. Rasterize strip
             const stripRaster = await this.rasterizeMesh(rotatedTriangles, gridStep, 0, stripBounds);
 
@@ -235,6 +240,10 @@ export class RasterPath {
             });
 
             scanlines.push(scanlineData.scanline);
+
+            if (i === 0) {
+                console.log(`  Scanline output: ${scanlineData.scanline.length} points`);
+            }
         }
 
         const endTime = performance.now();
@@ -242,6 +251,7 @@ export class RasterPath {
 
         // Combine scanlines into single Float32Array
         const pointsPerLine = scanlines[0].length;
+        console.log(`Total scanline output: ${pointsPerLine} points per line, ${angles.length} lines`);
         const pathData = new Float32Array(angles.length * pointsPerLine);
         for (let i = 0; i < scanlines.length; i++) {
             pathData.set(scanlines[i], i * pointsPerLine);

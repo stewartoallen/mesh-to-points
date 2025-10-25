@@ -18,6 +18,8 @@
     "test:toolpath": "npm run build && electron src/test/toolpath-regression.cjs",
     "test:tiled": "npm run build && electron src/test/toolpath-tiled-test.cjs",
     "test:radial": "npm run build && electron src/test/radial-toolpath-test.cjs",
+    "test:radial-padding": "npm run build && electron src/test/radial-padding-test.cjs",
+    "test:planar-vs-radial": "npm run build && electron src/test/planar-vs-radial-test.cjs",
     "test:webgpu": "npm run build && electron src/test/electron-test.js"
   },
   "keywords": [

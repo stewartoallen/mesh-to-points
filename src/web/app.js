@@ -1762,8 +1762,12 @@ generateToolpathBtn.addEventListener('click', async () => {
 
             // In radial mode, apply bounds override only to X-axis
             // Y is determined by tool radius, Z is the full terrain height
+            console.log('Original stlBounds:', stlBounds);
+
             let radialBounds = stlBounds;
             const boundsOverride = getBoundsOverride();
+            console.log('Bounds override:', boundsOverride);
+
             if (boundsOverride) {
                 radialBounds = {
                     min: {
@@ -1777,7 +1781,12 @@ generateToolpathBtn.addEventListener('click', async () => {
                         z: stlBounds.max.z         // Keep original Z
                     }
                 };
-                console.log('Radial mode: applying X bounds override', radialBounds);
+                console.log('Radial mode: applying X bounds override');
+                console.log('  stlBounds X:', stlBounds.min.x, 'to', stlBounds.max.x);
+                console.log('  override X:', boundsOverride.min.x, 'to', boundsOverride.max.x);
+                console.log('  radialBounds X:', radialBounds.min.x, 'to', radialBounds.max.x);
+            } else {
+                console.log('Radial mode: no bounds override, using stlBounds');
             }
 
             // Call radial toolpath generation
