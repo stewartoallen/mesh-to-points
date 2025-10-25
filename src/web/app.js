@@ -330,6 +330,12 @@ function initScene() {
         saveSettings();
     });
 
+    // X/Y step and rotation step input handlers
+    xStepInput.addEventListener('change', () => saveSettings());
+    yStepInput.addEventListener('change', () => saveSettings());
+    xRotationStepInput.addEventListener('change', () => saveSettings());
+    zFloorInput.addEventListener('change', () => saveSettings());
+
     // Bounds override checkbox handler
     useBoundsOverride.addEventListener('change', (e) => {
         boundsInputsDiv.style.display = e.target.checked ? 'block' : 'none';

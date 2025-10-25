@@ -101,6 +101,8 @@ struct Uniforms {
     spatial_grid_width: u32,
     spatial_grid_height: u32,
     spatial_cell_size: f32,
+    rotation_cos: f32,
+    rotation_sin: f32,
 }
 
 @group(0) @binding(0) var<storage, read> triangles: array<f32>;
@@ -109,6 +111,18 @@ struct Uniforms {
 @group(0) @binding(3) var<uniform> uniforms: Uniforms;
 @group(0) @binding(4) var<storage, read> spatial_cell_offsets: array<u32>;
 @group(0) @binding(5) var<storage, read> spatial_triangle_indices: array<u32>;
+
+// Rotate a point around the X-axis
+// X stays the same, Y and Z are rotated
+// Y' = Y*cos(θ) - Z*sin(θ)
+// Z' = Y*sin(θ) + Z*cos(θ)
+fn rotateAroundX(pos: vec3<f32>, cos_angle: f32, sin_angle: f32) -> vec3<f32> {
+    return vec3<f32>(
+        pos.x,
+        pos.y * cos_angle - pos.z * sin_angle,
+        pos.y * sin_angle + pos.z * cos_angle
+    );
+}
 
 // Fast 2D bounding box check for XY plane
 fn ray_hits_triangle_bbox_2d(ray_x: f32, ray_y: f32, v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>) -> bool {
@@ -231,21 +245,29 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let tri_idx = spatial_triangle_indices[idx];
         let tri_base = tri_idx * 9u;
 
-        let v0 = vec3<f32>(
+        // Read triangle vertices
+        var v0 = vec3<f32>(
             triangles[tri_base],
             triangles[tri_base + 1u],
             triangles[tri_base + 2u]
         );
-        let v1 = vec3<f32>(
+        var v1 = vec3<f32>(
             triangles[tri_base + 3u],
             triangles[tri_base + 4u],
             triangles[tri_base + 5u]
         );
-        let v2 = vec3<f32>(
+        var v2 = vec3<f32>(
             triangles[tri_base + 6u],
             triangles[tri_base + 7u],
             triangles[tri_base + 8u]
         );
+
+        // Apply rotation around X-axis if rotation is active (not identity)
+        if (uniforms.rotation_cos != 1.0 || uniforms.rotation_sin != 0.0) {
+            v0 = rotateAroundX(v0, uniforms.rotation_cos, uniforms.rotation_sin);
+            v1 = rotateAroundX(v1, uniforms.rotation_cos, uniforms.rotation_sin);
+            v2 = rotateAroundX(v2, uniforms.rotation_cos, uniforms.rotation_sin);
+        }
 
         let result = ray_triangle_intersect(ray_origin, ray_dir, v0, v1, v2);
         let hit = result.x;
@@ -395,7 +417,7 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
     const gridHeight = Math.max(1, Math.ceil((bounds.max.y - bounds.min.y) / cellSize));
     const totalCells = gridWidth * gridHeight;
 
-    console.log(`[WebGPU Worker] Building spatial grid ${gridWidth}x${gridHeight} (${cellSize}mm cells)`);
+    // console.log(`[WebGPU Worker] Building spatial grid ${gridWidth}x${gridHeight} (${cellSize}mm cells)`);
 
     const grid = new Array(totalCells);
     for (let i = 0; i < totalCells; i++) {
@@ -451,7 +473,7 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
     cellOffsets[totalCells] = currentOffset;
 
     const avgPerCell = totalTriangleRefs / totalCells;
-    console.log(`[WebGPU Worker] Spatial grid: ${totalTriangleRefs} refs (avg ${avgPerCell.toFixed(1)} per cell)`);
+    // console.log(`[WebGPU Worker] Spatial grid: ${totalTriangleRefs} refs (avg ${avgPerCell.toFixed(1)} per cell)`);
 
     return {
         gridWidth,
@@ -465,7 +487,7 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
 
 // Rasterize mesh to point cloud
 // Internal function - rasterize without tiling (do not modify this function!)
-async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverride = null) {
+async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}) {
     const startTime = performance.now();
 
     if (!isInitialized) {
@@ -478,13 +500,16 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverri
         console.log(`[WebGPU Worker] First-time init: ${(initEnd - initStart).toFixed(1)}ms`);
     }
 
-    console.log(`[WebGPU Worker] Rasterizing ${triangles.length / 9} triangles (step ${stepSize}mm, mode ${filterMode})...`);
+    // console.log(`[WebGPU Worker] Rasterizing ${triangles.length / 9} triangles (step ${stepSize}mm, mode ${filterMode})...`);
+
+    // Extract options
+    const boundsOverride = options.bounds || options.min ? options : null;  // Support old and new format
 
     // Use bounds override if provided, otherwise calculate from triangles
     const bounds = boundsOverride || calculateBounds(triangles);
 
     if (boundsOverride) {
-        console.log(`[WebGPU Worker] Using bounds override: min(${bounds.min.x.toFixed(2)}, ${bounds.min.y.toFixed(2)}, ${bounds.min.z.toFixed(2)}) max(${bounds.max.x.toFixed(2)}, ${bounds.max.y.toFixed(2)}, ${bounds.max.z.toFixed(2)})`);
+        // console.log(`[WebGPU Worker] Using bounds override: min(${bounds.min.x.toFixed(2)}, ${bounds.min.y.toFixed(2)}, ${bounds.min.z.toFixed(2)}) max(${bounds.max.x.toFixed(2)}, ${bounds.max.y.toFixed(2)}, ${bounds.max.z.toFixed(2)})`);
 
         // Validate bounds
         if (bounds.min.x >= bounds.max.x || bounds.min.y >= bounds.max.y || bounds.min.z >= bounds.max.z) {
@@ -496,7 +521,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverri
     const gridHeight = Math.ceil((bounds.max.y - bounds.min.y) / stepSize) + 1;
     const totalGridPoints = gridWidth * gridHeight;
 
-    console.log(`[WebGPU Worker] Grid: ${gridWidth}x${gridHeight} = ${totalGridPoints.toLocaleString()} points`);
+    // console.log(`[WebGPU Worker] Grid: ${gridWidth}x${gridHeight} = ${totalGridPoints.toLocaleString()} points`);
 
     // Calculate buffer size based on filter mode
     // filterMode 0 (terrain): Dense Z-only output (1 float per grid cell)
@@ -505,7 +530,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverri
     const outputSize = totalGridPoints * floatsPerPoint * 4;
     const maxBufferSize = device.limits.maxBufferSize || 268435456; // 256MB default
     const modeStr = filterMode === 0 ? 'terrain (dense Z-only)' : 'tool (sparse XYZ)';
-    console.log(`[WebGPU Worker] Output buffer size: ${(outputSize / 1024 / 1024).toFixed(2)} MB for ${modeStr} (max: ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB)`);
+    // console.log(`[WebGPU Worker] Output buffer size: ${(outputSize / 1024 / 1024).toFixed(2)} MB for ${modeStr} (max: ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB)`);
 
     if (outputSize > maxBufferSize) {
         throw new Error(`Output buffer too large: ${(outputSize / 1024 / 1024).toFixed(2)} MB exceeds device limit of ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB. Try a larger step size.`);
@@ -546,7 +571,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverri
         bounds.min.x, bounds.min.y, bounds.min.z,
         bounds.max.x, bounds.max.y, bounds.max.z,
         stepSize,
-        0, 0, 0, 0, 0, 0, 0, 0
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0  // Extended for rotation_cos and rotation_sin
     ]);
     const uniformDataU32 = new Uint32Array(uniformData.buffer);
     uniformDataU32[7] = gridWidth;
@@ -558,13 +583,19 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverri
     const uniformDataF32 = new Float32Array(uniformData.buffer);
     uniformDataF32[13] = spatialGrid.cellSize;
 
+    // Set rotation (identity by default: cos=1, sin=0)
+    const rotationAngleDeg = options.rotationAngleDeg ?? 0;
+    const rotationAngleRad = rotationAngleDeg * Math.PI / 180;
+    uniformDataF32[14] = Math.cos(rotationAngleRad);
+    uniformDataF32[15] = Math.sin(rotationAngleRad);
+
     // Check for u32 overflow
     const maxU32 = 4294967295;
     if (gridWidth > maxU32 || gridHeight > maxU32) {
         throw new Error(`Grid dimensions exceed u32 max: ${gridWidth}x${gridHeight}`);
     }
 
-    console.log(`[WebGPU Worker] Uniforms: gridWidth=${gridWidth}, gridHeight=${gridHeight}, triangles=${triangles.length / 9}`);
+    // console.log(`[WebGPU Worker] Uniforms: gridWidth=${gridWidth}, gridHeight=${gridHeight}, triangles=${triangles.length / 9}`);
 
     const uniformBuffer = device.createBuffer({
         size: uniformData.byteLength,
@@ -596,7 +627,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverri
 
     // Check dispatch limits
     const maxWorkgroupsPerDim = device.limits.maxComputeWorkgroupsPerDimension || 65535;
-    console.log(`[WebGPU Worker] Dispatching ${workgroupsX}x${workgroupsY} workgroups (max per dim: ${maxWorkgroupsPerDim})`);
+    // console.log(`[WebGPU Worker] Dispatching ${workgroupsX}x${workgroupsY} workgroups (max per dim: ${maxWorkgroupsPerDim})`);
 
     if (workgroupsX > maxWorkgroupsPerDim || workgroupsY > maxWorkgroupsPerDim) {
         throw new Error(`Workgroup dispatch too large: ${workgroupsX}x${workgroupsY} exceeds limit of ${maxWorkgroupsPerDim}. Try a larger step size.`);
@@ -645,7 +676,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverri
         for (let i = 0; i < totalGridPoints; i++) {
             if (result[i] > EMPTY_CELL + 1) validCount++;  // Any value significantly above sentinel
         }
-        console.log(`[WebGPU Worker] Dense terrain: ${totalGridPoints} grid cells, ${validCount} with geometry (${(validCount/totalGridPoints*100).toFixed(1)}% coverage)`);
+        // console.log(`[WebGPU Worker] Dense terrain: ${totalGridPoints} grid cells, ${validCount} with geometry (${(validCount/totalGridPoints*100).toFixed(1)}% coverage)`);
     } else {
         // Tool: Sparse output (X,Y,Z triplets), compact to remove invalid points
         const validPoints = [];
@@ -677,8 +708,8 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverri
 
     const endTime = performance.now();
     const conversionTime = endTime - startTime;
-    console.log(`[WebGPU Worker] ✅ Rasterize complete: ${pointCount} points in ${conversionTime.toFixed(1)}ms`);
-    console.log(`[WebGPU Worker] Bounds: min(${bounds.min.x.toFixed(2)}, ${bounds.min.y.toFixed(2)}, ${bounds.min.z.toFixed(2)}) max(${bounds.max.x.toFixed(2)}, ${bounds.max.y.toFixed(2)}, ${bounds.max.z.toFixed(2)})`);
+    // console.log(`[WebGPU Worker] ✅ Rasterize complete: ${pointCount} points in ${conversionTime.toFixed(1)}ms`);
+    // console.log(`[WebGPU Worker] Bounds: min(${bounds.min.x.toFixed(2)}, ${bounds.min.y.toFixed(2)}, ${bounds.min.z.toFixed(2)}) max(${bounds.max.x.toFixed(2)}, ${bounds.max.y.toFixed(2)}, ${bounds.max.z.toFixed(2)})`);
 
     // Verify result data integrity
     if (filterMode === 0) {
@@ -687,7 +718,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverri
             const EMPTY_CELL = -1e10;
             const firstZ = result[0] <= EMPTY_CELL + 1 ? 'EMPTY' : result[0].toFixed(3);
             const lastZ = result[result.length-1] <= EMPTY_CELL + 1 ? 'EMPTY' : result[result.length-1].toFixed(3);
-            console.log(`[WebGPU Worker] First Z: ${firstZ}, Last Z: ${lastZ}`);
+            // console.log(`[WebGPU Worker] First Z: ${firstZ}, Last Z: ${lastZ}`);
         }
     } else {
         // Tool: Sparse X,Y,Z format
@@ -695,7 +726,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverri
             const firstPoint = `(${result[0].toFixed(3)}, ${result[1].toFixed(3)}, ${result[2].toFixed(3)})`;
             const lastIdx = result.length - 3;
             const lastPoint = `(${result[lastIdx].toFixed(3)}, ${result[lastIdx+1].toFixed(3)}, ${result[lastIdx+2].toFixed(3)})`;
-            console.log(`[WebGPU Worker] First point: ${firstPoint}, Last point: ${lastPoint}`);
+            // console.log(`[WebGPU Worker] First point: ${firstPoint}, Last point: ${lastPoint}`);
         }
     }
 
@@ -949,7 +980,8 @@ function shouldUseTiling(bounds, stepSize) {
 }
 
 // Rasterize mesh - wrapper that handles automatic tiling if needed
-async function rasterizeMesh(triangles, stepSize, filterMode, boundsOverride = null) {
+async function rasterizeMesh(triangles, stepSize, filterMode, options = {}) {
+    const boundsOverride = options.bounds || options.min ? options : null;  // Support old and new format
     const bounds = boundsOverride || calculateBounds(triangles);
 
     // Check if tiling is needed
@@ -971,7 +1003,10 @@ async function rasterizeMesh(triangles, stepSize, filterMode, boundsOverride = n
             console.log(`[WebGPU Worker] Processing tile ${i + 1}/${tiles.length}: ${tiles[i].id}`);
             console.log(`[WebGPU Worker]   Tile bounds: min(${tiles[i].bounds.min.x.toFixed(2)}, ${tiles[i].bounds.min.y.toFixed(2)}) max(${tiles[i].bounds.max.x.toFixed(2)}, ${tiles[i].bounds.max.y.toFixed(2)})`);
 
-            const tileResult = await rasterizeMeshSingle(triangles, stepSize, filterMode, tiles[i].bounds);
+            const tileResult = await rasterizeMeshSingle(triangles, stepSize, filterMode, {
+                ...tiles[i].bounds,
+                rotationAngleDeg: options.rotationAngleDeg
+            });
 
             const tileTime = performance.now() - tileStart;
             console.log(`[WebGPU Worker]   Tile ${i + 1} complete: ${tileResult.pointCount} points in ${tileTime.toFixed(1)}ms`);
@@ -985,7 +1020,7 @@ async function rasterizeMesh(triangles, stepSize, filterMode, boundsOverride = n
         return stitchTiles(tileResults, bounds, stepSize);
     } else {
         // Single-pass rasterization
-        return await rasterizeMeshSingle(triangles, stepSize, filterMode, boundsOverride);
+        return await rasterizeMeshSingle(triangles, stepSize, filterMode, options);
     }
 }
 
@@ -1011,7 +1046,7 @@ function createHeightMapFromPoints(points, gridStep, bounds = null) {
     const height = Math.ceil((maxY - minY) / gridStep) + 1;
 
     // Terrain is ALWAYS dense (Z-only format from GPU rasterizer)
-    console.log(`[WebGPU Worker] Terrain dense format: ${width}x${height} = ${points.length} cells`);
+    // console.log(`[WebGPU Worker] Terrain dense format: ${width}x${height} = ${points.length} cells`);
 
     return {
         grid: points,  // Dense Z-only array
@@ -1563,16 +1598,16 @@ function generateRadialScanline(data) {
     const { stripPositions, stripBounds, toolPositions, xStep, zFloor, gridStep } = data;
     const EMPTY_CELL = -1e10;
 
-    console.log('[WebGPU Worker] Generating radial scanline...');
-    console.log(`[WebGPU Worker] Strip: ${stripPositions.length} cells, Tool: ${toolPositions.length/3} points, xStep: ${xStep}`);
+    // console.log('[WebGPU Worker] Generating radial scanline...');
+    // console.log(`[WebGPU Worker] Strip: ${stripPositions.length} cells, Tool: ${toolPositions.length/3} points, xStep: ${xStep}`);
 
     // Create height map from strip (dense Z-only format)
     const stripMap = createHeightMapFromPoints(stripPositions, gridStep, stripBounds);
-    console.log(`[WebGPU Worker] Strip map: ${stripMap.width}x${stripMap.height}`);
+    // console.log(`[WebGPU Worker] Strip map: ${stripMap.width}x${stripMap.height}`);
 
     // Create sparse tool representation
     const sparseTool = createSparseToolFromPoints(toolPositions, gridStep);
-    console.log(`[WebGPU Worker] Sparse tool: ${sparseTool.count} points`);
+    // console.log(`[WebGPU Worker] Sparse tool: ${sparseTool.count} points`);
 
     // Find center row (y=0 in world space)
     const centerY = Math.round((0 - stripMap.minY) / gridStep);
@@ -1582,7 +1617,7 @@ function generateRadialScanline(data) {
         throw new Error('Center row out of strip bounds');
     }
 
-    console.log(`[WebGPU Worker] Center row: ${centerY} (y=0)`);
+    // console.log(`[WebGPU Worker] Center row: ${centerY} (y=0)`);
 
     // Calculate output dimensions
     const outputWidth = Math.ceil(stripMap.width / xStep);
@@ -1627,8 +1662,8 @@ function generateRadialScanline(data) {
         scanline[outX] = maxZ;
     }
 
-    console.log(`[WebGPU Worker] ✅ Radial scanline complete: ${outputWidth} points`);
-    console.log(`[WebGPU Worker] First 10 values: ${Array.from(scanline.slice(0, 10)).map(v => v.toFixed(2)).join(',')}`);
+    // console.log(`[WebGPU Worker] ✅ Radial scanline complete: ${outputWidth} points`);
+    // console.log(`[WebGPU Worker] First 10 values: ${Array.from(scanline.slice(0, 10)).map(v => v.toFixed(2)).join(',')}`);
 
     return {
         scanline
@@ -1666,8 +1701,9 @@ self.onmessage = async function(e) {
                 break;
 
             case 'rasterize':
-                const { triangles, stepSize, filterMode, isForTool, boundsOverride } = data;
-                const rasterResult = await rasterizeMesh(triangles, stepSize, filterMode, boundsOverride);
+                const { triangles, stepSize, filterMode, isForTool, boundsOverride, rotationAngleDeg } = data;
+                const rasterOptions = boundsOverride ? { ...boundsOverride, rotationAngleDeg } : { rotationAngleDeg };
+                const rasterResult = await rasterizeMesh(triangles, stepSize, filterMode, rasterOptions);
                 self.postMessage({
                     type: 'rasterize-complete',
                     data: rasterResult,

@@ -29,7 +29,7 @@ function createWindow() {
             (async function() {
                 try {
                     console.log('=== Radial Production Benchmark ===');
-                    console.log('Settings: Detail 0.05mm, Rotation 5°, X step 1');
+                    console.log('Settings: Detail 0.05mm, Rotation 1°, X step 1');
 
                     if (!navigator.gpu) {
                         return { error: 'WebGPU not available' };
@@ -144,7 +144,7 @@ function createWindow() {
                     console.log(\`✓ Tool rasterized: \${toolResult.pointCount} points\`);
 
                     // Production settings
-                    const xRotationStep = 5;  // 5° steps = 72 rotations
+                    const xRotationStep = 1;  // 1° steps = 360 rotations
                     const xStep = 1;          // Sample every grid point
                     const zFloor = 0;
 

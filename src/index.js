@@ -271,7 +271,6 @@ export class RasterPath {
         const scanlines = [];
         for (let i = 0; i < angles.length; i++) {
             const angle = angles[i];
-            console.log(`Processing rotation ${i + 1}/${angles.length}: ${angle}°`);
 
             // 1. Rotate terrain triangles
             const rotatedTriangles = this._rotateTrianglesAroundX(terrainTriangles, angle);
@@ -289,11 +288,6 @@ export class RasterPath {
                     z: terrainBounds.max.z
                 }
             };
-
-            if (i === 0) {
-                console.log(`Strip bounds for rotation ${angle}°:`, stripBounds);
-                console.log(`  X range: ${stripBounds.min.x.toFixed(2)} to ${stripBounds.max.x.toFixed(2)} (width: ${(stripBounds.max.x - stripBounds.min.x).toFixed(2)}mm)`);
-            }
 
             // 3. Rasterize strip
             const stripRaster = await this.rasterizeMesh(rotatedTriangles, gridStep, 0, stripBounds);
@@ -433,10 +427,7 @@ export class RasterPath {
         for (let i = 0; i < angles.length; i++) {
             const angle = angles[i];
 
-            // 1. Rotate terrain triangles
-            const rotatedTriangles = this._rotateTrianglesAroundX(terrainTriangles, angle);
-
-            // 2. Define strip bounds
+            // 1. Define strip bounds (narrow band for rasterization)
             const stripBounds = {
                 min: {
                     x: terrainBounds.min.x,
@@ -450,13 +441,20 @@ export class RasterPath {
                 }
             };
 
-            // 3. Rasterize strip using this worker
+            // 2. Rasterize strip using this worker (GPU will rotate triangles)
             const stripRaster = await new Promise((resolve, reject) => {
                 const handler = (data) => resolve(data);
                 this._sendWorkerMessage(
                     workerState,
                     'rasterize',
-                    { triangles: rotatedTriangles, stepSize: gridStep, filterMode: 0, isForTool: false, boundsOverride: stripBounds },
+                    {
+                        triangles: terrainTriangles,  // Pass unrotated triangles
+                        stepSize: gridStep,
+                        filterMode: 0,
+                        isForTool: false,
+                        boundsOverride: stripBounds,
+                        rotationAngleDeg: angle  // GPU will apply rotation
+                    },
                     'rasterize-complete',
                     handler
                 );
