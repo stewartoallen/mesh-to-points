@@ -356,6 +356,16 @@ function initScene() {
             boundsMaxY.value = stlBounds.max.y.toFixed(2);
             boundsMaxZ.value = stlBounds.max.z.toFixed(2);
             saveSettings();
+
+            // In radial mode, changing bounds invalidates toolpath
+            if (toolpathMode === 'radial' && toolpathCloud) {
+                scene.remove(toolpathCloud);
+                toolpathCloud.geometry.dispose();
+                toolpathCloud.material.dispose();
+                toolpathCloud = null;
+                clearToolpathBtn.disabled = true;
+                console.log('Cleared toolpath due to bounds change (radial mode)');
+            }
         } else {
             alert('Please load an STL file first');
         }
@@ -399,6 +409,16 @@ function initScene() {
         boundsMaxY.value = (maxY + paddingY).toFixed(2);
         boundsMaxZ.value = (maxZ + paddingZ).toFixed(2);
         saveSettings();
+
+        // In radial mode, changing bounds invalidates toolpath
+        if (toolpathMode === 'radial' && toolpathCloud) {
+            scene.remove(toolpathCloud);
+            toolpathCloud.geometry.dispose();
+            toolpathCloud.material.dispose();
+            toolpathCloud = null;
+            clearToolpathBtn.disabled = true;
+            console.log('Cleared toolpath due to bounds padding (radial mode)');
+        }
     });
 
     // Recompute button handler
@@ -689,6 +709,11 @@ function handleRasterizeComplete(data, isForTool) {
         // Auto-populate bounds if custom bounds is enabled and inputs are empty
         if (useBoundsOverride.checked && !boundsMinX.value) {
             populateBoundsFromTerrain();
+        }
+
+        // Enable generate button if tool is already loaded
+        if (toolData) {
+            generateToolpathBtn.disabled = false;
         }
     }
 }
@@ -1079,7 +1104,7 @@ function updateTimingPanel() {
 // Display toolpath in scene
 function displayToolpath(data) {
     console.log('displayToolpath: received data', data);
-    const { pathData, numScanlines, pointsPerLine, isRadial, rotationStepDegrees } = data;
+    const { pathData, numScanlines, pointsPerLine, isRadial, rotationStepDegrees, generationBounds } = data;
 
     // Remove existing toolpath cloud
     if (toolpathCloud) {
@@ -1096,7 +1121,8 @@ function displayToolpath(data) {
         return;
     }
 
-    const bounds = terrainData.bounds;
+    // Use generationBounds if provided (for radial mode with padding), otherwise use terrain bounds
+    const bounds = generationBounds || terrainData.bounds;
 
     // The toolpath is in grid index space, we need to map it back to world coordinates
     // The grid step size used for the point cloud
@@ -1734,6 +1760,26 @@ generateToolpathBtn.addEventListener('click', async () => {
 
             console.log('Radial Parameters: X step:', xStep, 'Rotation step:', xRotationStep, 'Z floor:', zFloor, 'Grid step:', STEP_SIZE);
 
+            // In radial mode, apply bounds override only to X-axis
+            // Y is determined by tool radius, Z is the full terrain height
+            let radialBounds = stlBounds;
+            const boundsOverride = getBoundsOverride();
+            if (boundsOverride) {
+                radialBounds = {
+                    min: {
+                        x: boundsOverride.min.x,  // Use override X
+                        y: stlBounds.min.y,        // Keep original Y (will be recalculated by tool radius)
+                        z: stlBounds.min.z         // Keep original Z
+                    },
+                    max: {
+                        x: boundsOverride.max.x,  // Use override X
+                        y: stlBounds.max.y,        // Keep original Y (will be recalculated by tool radius)
+                        z: stlBounds.max.z         // Keep original Z
+                    }
+                };
+                console.log('Radial mode: applying X bounds override', radialBounds);
+            }
+
             // Call radial toolpath generation
             const result = await rasterPath.generateRadialToolpath(
                 terrainTriangles,
@@ -1742,7 +1788,7 @@ generateToolpathBtn.addEventListener('click', async () => {
                 xStep,
                 zFloor,
                 STEP_SIZE,
-                stlBounds
+                radialBounds
             );
 
             console.log('Radial toolpath complete:', result);
@@ -1754,7 +1800,8 @@ generateToolpathBtn.addEventListener('click', async () => {
                 pointsPerLine: result.pointsPerLine,
                 generationTime: result.generationTime,
                 isRadial: true,
-                rotationStepDegrees: result.rotationStepDegrees
+                rotationStepDegrees: result.rotationStepDegrees,
+                generationBounds: radialBounds  // Pass bounds used for generation
             });
 
         } catch (error) {
