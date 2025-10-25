@@ -603,6 +603,14 @@ async function initWorkers() {
         rasterPath = new RasterPath();
         await rasterPath.init();
         console.log('✓ RasterPath API initialized');
+
+        // Initialize worker pool for parallel processing
+        try {
+            await rasterPath.initWorkerPool();
+            console.log('✓ RasterPath worker pool initialized');
+        } catch (error) {
+            console.warn('Failed to initialize worker pool, will use sequential processing:', error);
+        }
     } catch (error) {
         console.error('Failed to initialize RasterPath API:', error);
     }

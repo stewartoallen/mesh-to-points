@@ -18,6 +18,7 @@
 export class RasterPath {
     constructor(config = {}) {
         this.worker = null;
+        this.workerPool = []; // Pool of workers for parallel processing
         this.isInitialized = false;
         this.messageHandlers = new Map();
         this.messageId = 0;
@@ -30,6 +31,7 @@ export class RasterPath {
             tileOverlapMM: config.tileOverlapMM ?? 10,
             autoTiling: config.autoTiling ?? true,
             minTileSize: config.minTileSize ?? 50,
+            parallelWorkers: config.parallelWorkers ?? 4, // Number of workers for radial mode
         };
     }
 
@@ -77,6 +79,75 @@ export class RasterPath {
                 reject(error);
             }
         });
+    }
+
+    /**
+     * Initialize worker pool for parallel processing
+     * Creates multiple WebGPU workers for parallel radial toolpath generation
+     * @returns {Promise<boolean>} Success status
+     */
+    async initWorkerPool() {
+        if (this.workerPool.length > 0) {
+            return true; // Already initialized
+        }
+
+        const numWorkers = this.config.parallelWorkers;
+        console.log(`[RasterPath] Initializing worker pool with ${numWorkers} workers...`);
+
+        const isBuildVersion = import.meta.url.includes('/build/') || import.meta.url.includes('raster-path.js');
+        const workerPath = isBuildVersion
+            ? new URL('./webgpu-worker.js', import.meta.url)
+            : new URL('./web/webgpu-worker.js', import.meta.url);
+
+        // Create and initialize all workers in parallel
+        const initPromises = [];
+        for (let i = 0; i < numWorkers; i++) {
+            const promise = new Promise((resolve, reject) => {
+                try {
+                    const worker = new Worker(workerPath, { type: 'module' });
+                    const workerState = {
+                        worker,
+                        messageHandlers: new Map(),
+                        messageId: 0
+                    };
+
+                    worker.onmessage = (e) => this._handleWorkerMessage(workerState, e);
+                    worker.onerror = (error) => {
+                        console.error(`[RasterPath] Worker ${i} error:`, error);
+                        reject(error);
+                    };
+
+                    // Send init message
+                    const handler = (data) => {
+                        if (data.success) {
+                            console.log(`[RasterPath] Worker ${i} initialized`);
+                            resolve(workerState);
+                        } else {
+                            reject(new Error(`Worker ${i} failed to initialize WebGPU`));
+                        }
+                    };
+
+                    this._sendWorkerMessage(workerState, 'init', { config: this.config }, 'webgpu-ready', handler);
+                } catch (error) {
+                    reject(error);
+                }
+            });
+            initPromises.push(promise);
+        }
+
+        try {
+            this.workerPool = await Promise.all(initPromises);
+            console.log(`[RasterPath] Worker pool initialized with ${this.workerPool.length} workers`);
+            return true;
+        } catch (error) {
+            console.error('[RasterPath] Failed to initialize worker pool:', error);
+            // Clean up any initialized workers
+            for (const workerState of this.workerPool) {
+                workerState.worker.terminate();
+            }
+            this.workerPool = [];
+            throw error;
+        }
     }
 
     /**
@@ -187,6 +258,15 @@ export class RasterPath {
         console.log(`Generating radial toolpath: ${angles.length} rotations at ${xRotationStep}° steps`);
         console.log(`Tool radius: ${toolRadius.toFixed(2)}mm`);
 
+        // Try to use parallel processing if worker pool is initialized
+        if (this.workerPool.length > 0 && angles.length >= this.workerPool.length) {
+            console.log(`[RasterPath] Using parallel processing with ${this.workerPool.length} workers`);
+            return this._generateRadialToolpathParallel(
+                terrainTriangles, toolPositions, angles, xStep, zFloor,
+                gridStep, terrainBounds, toolRadius, xRotationStep, startTime
+            );
+        }
+
         // Process each rotation sequentially
         const scanlines = [];
         for (let i = 0; i < angles.length; i++) {
@@ -266,6 +346,145 @@ export class RasterPath {
             rotationStepDegrees: xRotationStep,
             generationTime
         };
+    }
+
+    /**
+     * Generate radial toolpath using parallel workers
+     * Internal method - called by generateRadialToolpath when worker pool is available
+     */
+    async _generateRadialToolpathParallel(terrainTriangles, toolPositions, angles, xStep, zFloor, gridStep, terrainBounds, toolRadius, xRotationStep, startTime) {
+        const numWorkers = this.workerPool.length;
+
+        // Split angles across workers
+        const anglesPerWorker = Math.ceil(angles.length / numWorkers);
+        const workerTasks = [];
+
+        for (let workerIdx = 0; workerIdx < numWorkers; workerIdx++) {
+            const startIdx = workerIdx * anglesPerWorker;
+            const endIdx = Math.min(startIdx + anglesPerWorker, angles.length);
+            if (startIdx >= angles.length) break;
+
+            const workerAngles = angles.slice(startIdx, endIdx);
+            workerTasks.push({
+                workerIdx,
+                workerState: this.workerPool[workerIdx],
+                angles: workerAngles,
+                startIdx,
+                endIdx
+            });
+        }
+
+        console.log(`[RasterPath] Split ${angles.length} rotations across ${workerTasks.length} workers`);
+
+        // Process all worker tasks in parallel
+        const workerPromises = workerTasks.map(task =>
+            this._processWorkerRotations(
+                task.workerState,
+                task.workerIdx,
+                terrainTriangles,
+                toolPositions,
+                task.angles,
+                xStep,
+                zFloor,
+                gridStep,
+                terrainBounds,
+                toolRadius
+            )
+        );
+
+        // Wait for all workers to complete
+        const workerResults = await Promise.all(workerPromises);
+
+        // Combine results in correct order
+        const allScanlines = [];
+        for (const result of workerResults) {
+            allScanlines.push(...result.scanlines);
+        }
+
+        const endTime = performance.now();
+        const generationTime = endTime - startTime;
+
+        // Combine scanlines into single Float32Array
+        const pointsPerLine = allScanlines[0].length;
+        console.log(`Total scanline output: ${pointsPerLine} points per line, ${angles.length} lines`);
+        const pathData = new Float32Array(angles.length * pointsPerLine);
+        for (let i = 0; i < allScanlines.length; i++) {
+            pathData.set(allScanlines[i], i * pointsPerLine);
+        }
+
+        console.log(`✅ Radial toolpath complete (parallel): ${angles.length} rotations × ${pointsPerLine} points in ${generationTime.toFixed(1)}ms`);
+
+        return {
+            pathData,
+            numRotations: angles.length,
+            pointsPerLine,
+            rotationStepDegrees: xRotationStep,
+            generationTime
+        };
+    }
+
+    /**
+     * Process rotations for a single worker
+     * Internal method - processes a subset of angles in one worker
+     */
+    async _processWorkerRotations(workerState, workerIdx, terrainTriangles, toolPositions, angles, xStep, zFloor, gridStep, terrainBounds, toolRadius) {
+        const scanlines = [];
+
+        for (let i = 0; i < angles.length; i++) {
+            const angle = angles[i];
+
+            // 1. Rotate terrain triangles
+            const rotatedTriangles = this._rotateTrianglesAroundX(terrainTriangles, angle);
+
+            // 2. Define strip bounds
+            const stripBounds = {
+                min: {
+                    x: terrainBounds.min.x,
+                    y: -toolRadius,
+                    z: terrainBounds.min.z
+                },
+                max: {
+                    x: terrainBounds.max.x,
+                    y: toolRadius,
+                    z: terrainBounds.max.z
+                }
+            };
+
+            // 3. Rasterize strip using this worker
+            const stripRaster = await new Promise((resolve, reject) => {
+                const handler = (data) => resolve(data);
+                this._sendWorkerMessage(
+                    workerState,
+                    'rasterize',
+                    { triangles: rotatedTriangles, stepSize: gridStep, filterMode: 0, isForTool: false, boundsOverride: stripBounds },
+                    'rasterize-complete',
+                    handler
+                );
+            });
+
+            // 4. Generate scanline from strip using this worker
+            const scanlineData = await new Promise((resolve, reject) => {
+                const handler = (data) => resolve(data);
+                this._sendWorkerMessage(
+                    workerState,
+                    'generate-radial-scanline',
+                    {
+                        stripPositions: stripRaster.positions,
+                        stripBounds: stripRaster.bounds,
+                        toolPositions,
+                        xStep,
+                        zFloor,
+                        gridStep
+                    },
+                    'radial-scanline-complete',
+                    handler
+                );
+            });
+
+            scanlines.push(scanlineData.scanline);
+        }
+
+        return { scanlines };
     }
 
     /**
@@ -350,6 +569,13 @@ export class RasterPath {
             this.messageHandlers.clear();
             this.deviceCapabilities = null;
         }
+
+        // Clean up worker pool
+        for (const workerState of this.workerPool) {
+            workerState.worker.terminate();
+            workerState.messageHandlers.clear();
+        }
+        this.workerPool = [];
     }
 
     // Internal methods
@@ -403,6 +629,25 @@ export class RasterPath {
         const id = this.messageId++;
         this.messageHandlers.set(id, { responseType, callback });
         this.worker.postMessage({ type, data });
+    }
+
+    _handleWorkerMessage(workerState, e) {
+        const { type, success, data } = e.data;
+
+        // Find handler for this message type in this worker's handlers
+        for (const [id, handler] of workerState.messageHandlers.entries()) {
+            if (handler.responseType === type) {
+                workerState.messageHandlers.delete(id);
+                handler.callback(data);
+                break;
+            }
+        }
+    }
+
+    _sendWorkerMessage(workerState, type, data, responseType, callback) {
+        const id = workerState.messageId++;
+        workerState.messageHandlers.set(id, { responseType, callback });
+        workerState.worker.postMessage({ type, data });
     }
 
     _parseSTL(buffer) {

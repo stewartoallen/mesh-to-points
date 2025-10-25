@@ -51,6 +51,14 @@ function createWindow() {
                 await rasterPath.init();
                 console.log('✓ RasterPath initialized');
 
+                // Initialize worker pool for parallel processing
+                try {
+                    await rasterPath.initWorkerPool();
+                    console.log('✓ Worker pool initialized');
+                } catch (error) {
+                    console.warn('Failed to initialize worker pool:', error);
+                }
+
                 // Generate test terrain: simple cone
                 // This is a good test for radial mode since it's rotationally symmetric
                 const terrainTriangles = [];
