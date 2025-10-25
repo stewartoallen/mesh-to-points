@@ -258,24 +258,12 @@ export class RasterPath {
         console.log(`Generating radial toolpath: ${angles.length} rotations at ${xRotationStep}° steps`);
         console.log(`Tool radius: ${toolRadius.toFixed(2)}mm`);
 
-        // TEMPORARY: Only use batched GPU in Electron due to Chrome timeout issues
-        // Chrome WebGPU has stricter execution time limits than Electron
-        // The batched shader tests 75K triangles × 7.8K tool points which exceeds Chrome's limit
-        // TODO: Fix with rotation-aware spatial partitioning or bounding sphere culling
-        const isElectron = navigator.userAgent.toLowerCase().includes('electron');
-        console.log(`[RasterPath] Debug: isElectron=${isElectron}, userAgent=${navigator.userAgent}, workerPool=${this.workerPool.length}, angles=${angles.length}`);
-
-        if (isElectron && this.workerPool.length > 0 && angles.length >= 4) {
-            console.log(`[RasterPath] Using batched GPU processing (Phase 2B)`);
-            return this._generateRadialToolpathBatched(
-                terrainTriangles, toolPositions, angles, xStep, zFloor,
-                gridStep, terrainBounds, toolRadius, xRotationStep, startTime
-            );
-        }
-
-        // Fall back to Phase 2A (parallel workers with GPU rotation) for Chrome
+        // Use Phase 2A (parallel workers with GPU rotation) for production
+        // Phase 2B was tested with X-axis sharding but proved slower (60+ seconds vs 5-6 seconds)
+        // Each Phase 2B band processes ALL 360 rotations × ALL tool points, which is too expensive
+        // Phase 2A splits rotations across workers and provides excellent performance
         if (this.workerPool.length > 0 && angles.length >= 4) {
-            console.log(`[RasterPath] Falling back to Phase 2A (parallel workers with GPU rotation)`);
+            console.log(`[RasterPath] Using Phase 2A (parallel workers with GPU rotation)`);
             return this._generateRadialToolpathParallel(
                 terrainTriangles, toolPositions, angles, xStep, zFloor,
                 gridStep, terrainBounds, toolRadius, xRotationStep, startTime
@@ -435,43 +423,186 @@ export class RasterPath {
     }
 
     /**
-     * Generate radial toolpath using batched GPU processing (Phase 2B)
-     * All rotations processed in a single GPU dispatch
+     * Partition triangles into X-axis bands for sharded processing
+     * @param {Float32Array} triangles - Triangle vertex data [x0,y0,z0, x1,y1,z1, x2,y2,z2, ...]
+     * @param {object} bounds - Terrain bounds {min: {x,y,z}, max: {x,y,z}}
+     * @param {number} numBands - Number of X bands to create
+     * @returns {Array} Array of {bandLow, bandHigh, triangles, xStartIdx, xEndIdx, pointsInBand}
+     */
+    _partitionTrianglesByX(triangles, bounds, numBands, xStep, gridStep) {
+        const xRange = bounds.max.x - bounds.min.x;
+        const bandWidth = xRange / numBands;
+
+        // Calculate total points per line
+        const totalPointsPerLine = Math.floor(xRange / (xStep * gridStep)) + 1;
+
+        const bands = [];
+
+        for (let i = 0; i < numBands; i++) {
+            const bandLow = bounds.min.x + i * bandWidth;
+            const bandHigh = i === numBands - 1 ? bounds.max.x : bandLow + bandWidth;
+
+            // Calculate which X grid indices this band covers
+            const xStartIdx = Math.floor((bandLow - bounds.min.x) / (xStep * gridStep));
+            const xEndIdx = i === numBands - 1 ? totalPointsPerLine - 1 : Math.floor((bandHigh - bounds.min.x) / (xStep * gridStep));
+            const pointsInBand = xEndIdx - xStartIdx + 1;
+
+            // Filter triangles that overlap this band
+            const bandTriangles = [];
+            for (let t = 0; t < triangles.length; t += 9) {
+                const x0 = triangles[t];
+                const x1 = triangles[t + 3];
+                const x2 = triangles[t + 6];
+
+                // Reject if entirely outside band (short-circuit optimization)
+                const allBelow = x0 < bandLow && x1 < bandLow && x2 < bandLow;
+                const allAbove = x0 > bandHigh && x1 > bandHigh && x2 > bandHigh;
+
+                if (!allBelow && !allAbove) {
+                    // Keep this triangle - it intersects or spans the band
+                    for (let v = 0; v < 9; v++) {
+                        bandTriangles.push(triangles[t + v]);
+                    }
+                }
+            }
+
+            bands.push({
+                bandLow,
+                bandHigh,
+                triangles: new Float32Array(bandTriangles),
+                xStartIdx,
+                xEndIdx,
+                pointsInBand
+            });
+        }
+
+        return bands;
+    }
+
+    /**
+     * Generate radial toolpath using batched GPU processing with X-axis sharding (Phase 2B)
+     * Triangles are partitioned into X bands, each processed in a separate batched GPU dispatch
      */
     async _generateRadialToolpathBatched(terrainTriangles, toolPositions, angles, xStep, zFloor, gridStep, terrainBounds, toolRadius, xRotationStep, startTime) {
-        // Send to worker for batched GPU processing
-        const result = await new Promise((resolve, reject) => {
-            const handler = (data) => resolve(data);
+        const numTriangles = terrainTriangles.length / 9;
 
-            this._sendMessage(
-                'generate-batched-radial',
-                {
-                    triangles: new Float32Array(terrainTriangles),
-                    angles: new Float32Array(angles),
-                    toolPositions: new Float32Array(toolPositions),
-                    xStep,
-                    zFloor,
-                    gridStep,
-                    terrainBounds
-                },
-                'batched-radial-complete',
-                handler
+        // Determine number of bands based on triangle count
+        // Target: ~3K triangles per band to stay well under WebGPU timeout
+        // Note: Triangle counts per band can be higher due to overlaps (triangles spanning bands)
+        // Each band processes ALL 360 rotations × ALL tool points, so triangle count must be very low
+        const targetTrianglesPerBand = 3000;
+        const numBands = Math.max(1, Math.ceil(numTriangles / targetTrianglesPerBand));
+
+        console.log(`[RasterPath] Phase 2B with X-axis sharding: ${numBands} bands`);
+
+        // Partition triangles into X bands
+        const bands = this._partitionTrianglesByX(terrainTriangles, terrainBounds, numBands, xStep, gridStep);
+
+        // Log band statistics
+        for (let i = 0; i < bands.length; i++) {
+            const band = bands[i];
+            console.log(`[RasterPath] Band ${i}: X[${band.bandLow.toFixed(1)}, ${band.bandHigh.toFixed(1)}], ${band.triangles.length/9} triangles, ${band.pointsInBand} points`);
+        }
+
+        // Calculate total points per line for result array
+        const xRange = terrainBounds.max.x - terrainBounds.min.x;
+        const totalPointsPerLine = Math.floor(xRange / (xStep * gridStep)) + 1;
+
+        // Allocate result array
+        const pathData = new Float32Array(angles.length * totalPointsPerLine);
+
+        // Split bands across workers for parallel processing
+        const numWorkers = this.workerPool.length;
+        const bandsPerWorker = Math.ceil(bands.length / numWorkers);
+
+        console.log(`[RasterPath] Splitting ${bands.length} bands across ${numWorkers} workers (${bandsPerWorker} bands/worker)`);
+
+        // Process bands in parallel across workers
+        const workerPromises = [];
+
+        for (let workerIdx = 0; workerIdx < numWorkers; workerIdx++) {
+            const workerBands = bands.slice(
+                workerIdx * bandsPerWorker,
+                Math.min((workerIdx + 1) * bandsPerWorker, bands.length)
             );
-        });
+
+            if (workerBands.length === 0) continue;
+
+            const workerPromise = (async () => {
+                const workerState = this.workerPool[workerIdx];
+                const workerBandResults = [];
+
+                for (const band of workerBands) {
+                    // Create modified bounds for this band
+                    const bandBounds = {
+                        min: { x: band.bandLow, y: terrainBounds.min.y, z: terrainBounds.min.z },
+                        max: { x: band.bandHigh, y: terrainBounds.max.y, z: terrainBounds.max.z }
+                    };
+
+                    // Process band with batched GPU on this worker
+                    const bandResult = await new Promise((resolve, reject) => {
+                        const handler = (data) => resolve(data);
+
+                        this._sendWorkerMessage(
+                            workerState,
+                            'generate-batched-radial',
+                            {
+                                triangles: band.triangles,
+                                angles: new Float32Array(angles),
+                                toolPositions: new Float32Array(toolPositions),
+                                xStep,
+                                zFloor,
+                                gridStep,
+                                terrainBounds: bandBounds
+                            },
+                            'batched-radial-complete',
+                            handler
+                        );
+                    });
+
+                    workerBandResults.push({ band, result: bandResult });
+                }
+
+                return workerBandResults;
+            })();
+
+            workerPromises.push(workerPromise);
+        }
+
+        // Wait for all workers to complete
+        const allWorkerResults = await Promise.all(workerPromises);
+
+        // Stitch all band results into final array
+        for (const workerResults of allWorkerResults) {
+            for (const { band, result } of workerResults) {
+                // result.pathData is organized as: [rotation0_points, rotation1_points, ...]
+                // Copy each rotation's points to the correct offset in pathData
+                for (let rotIdx = 0; rotIdx < angles.length; rotIdx++) {
+                    const srcOffset = rotIdx * band.pointsInBand;
+                    const dstOffset = rotIdx * totalPointsPerLine + band.xStartIdx;
+
+                    for (let p = 0; p < band.pointsInBand; p++) {
+                        pathData[dstOffset + p] = result.pathData[srcOffset + p];
+                    }
+                }
+            }
+        }
+
+        console.log(`[RasterPath] All ${bands.length} bands complete`);
 
         const endTime = performance.now();
         const generationTime = endTime - startTime;
 
-        console.log(`✅ Radial toolpath complete (batched GPU): ${angles.length} rotations × ${result.pointsPerLine} points in ${generationTime.toFixed(1)}ms`);
+        console.log(`✅ Radial toolpath complete (batched GPU with sharding): ${angles.length} rotations × ${totalPointsPerLine} points in ${generationTime.toFixed(1)}ms`);
 
         // Debug: Check first 10 values
-        const firstTen = Array.from(result.pathData.slice(0, 10)).map(v => v.toFixed(3)).join(', ');
+        const firstTen = Array.from(pathData.slice(0, 10)).map(v => v.toFixed(3)).join(', ');
         console.log(`[RasterPath] First 10 pathData values: ${firstTen}`);
 
         return {
-            pathData: result.pathData,
-            numRotations: result.numRotations,
-            pointsPerLine: result.pointsPerLine,
+            pathData,
+            numRotations: angles.length,
+            pointsPerLine: totalPointsPerLine,
             rotationStepDegrees: xRotationStep,
             generationTime
         };
