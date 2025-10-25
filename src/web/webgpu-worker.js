@@ -1594,17 +1594,8 @@ function generateRadialScanline(data) {
 
         if (gridX >= stripMap.width) break;
 
-        // Get terrain Z at this position (center row)
-        const terrainIdx = centerY * stripMap.width + gridX;
-        const terrainZ = stripMap.grid[terrainIdx];
-
-        // If terrain is empty, use floor value
-        if (terrainZ === EMPTY_CELL) {
-            scanline[outX] = zFloor;
-            continue;
-        }
-
         // Find maximum tool-terrain collision
+        // Note: Don't skip if center is empty - tool edges might still touch terrain
         let maxZ = zFloor;
 
         for (let i = 0; i < sparseTool.count; i++) {
