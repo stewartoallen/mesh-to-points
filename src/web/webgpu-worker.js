@@ -1559,6 +1559,91 @@ function stitchToolpathTiles(tileResults, globalBounds, gridStep, xStep, yStep) 
     };
 }
 
+function generateRadialScanline(data) {
+    const { stripPositions, stripBounds, toolPositions, xStep, zFloor, gridStep } = data;
+    const EMPTY_CELL = -1e10;
+
+    console.log('[WebGPU Worker] Generating radial scanline...');
+    console.log(`[WebGPU Worker] Strip: ${stripPositions.length} cells, Tool: ${toolPositions.length/3} points, xStep: ${xStep}`);
+
+    // Create height map from strip (dense Z-only format)
+    const stripMap = createHeightMapFromPoints(stripPositions, gridStep, stripBounds);
+    console.log(`[WebGPU Worker] Strip map: ${stripMap.width}x${stripMap.height}`);
+
+    // Create sparse tool representation
+    const sparseTool = createSparseToolFromPoints(toolPositions, gridStep);
+    console.log(`[WebGPU Worker] Sparse tool: ${sparseTool.count} points`);
+
+    // Find center row (y=0 in world space)
+    const centerY = Math.round((0 - stripMap.minY) / gridStep);
+
+    if (centerY < 0 || centerY >= stripMap.height) {
+        console.error(`[WebGPU Worker] Center row ${centerY} out of bounds [0, ${stripMap.height})`);
+        throw new Error('Center row out of strip bounds');
+    }
+
+    console.log(`[WebGPU Worker] Center row: ${centerY} (y=0)`);
+
+    // Calculate output dimensions
+    const outputWidth = Math.ceil(stripMap.width / xStep);
+    const scanline = new Float32Array(outputWidth);
+
+    // Process each output position along X-axis
+    for (let outX = 0; outX < outputWidth; outX++) {
+        const gridX = outX * xStep;
+
+        if (gridX >= stripMap.width) break;
+
+        // Get terrain Z at this position (center row)
+        const terrainIdx = centerY * stripMap.width + gridX;
+        const terrainZ = stripMap.grid[terrainIdx];
+
+        // If terrain is empty, use floor value
+        if (terrainZ === EMPTY_CELL) {
+            scanline[outX] = zFloor;
+            continue;
+        }
+
+        // Find maximum tool-terrain collision
+        let maxZ = zFloor;
+
+        for (let i = 0; i < sparseTool.count; i++) {
+            const toolOffsetX = sparseTool.xOffsets[i];
+            const toolOffsetY = sparseTool.yOffsets[i];
+            const toolZ = sparseTool.zValues[i];
+
+            // Calculate terrain lookup position
+            const terrainGridX = gridX + toolOffsetX;
+            const terrainGridY = centerY + toolOffsetY;
+
+            // Check bounds
+            if (terrainGridX < 0 || terrainGridX >= stripMap.width ||
+                terrainGridY < 0 || terrainGridY >= stripMap.height) {
+                continue;
+            }
+
+            // Get terrain height at this position
+            const idx = terrainGridY * stripMap.width + terrainGridX;
+            const terrainHeight = stripMap.grid[idx];
+
+            if (terrainHeight === EMPTY_CELL) continue;
+
+            // Calculate tool center Z needed to just touch terrain
+            const toolCenterZ = terrainHeight - toolZ;
+            maxZ = Math.max(maxZ, toolCenterZ);
+        }
+
+        scanline[outX] = maxZ;
+    }
+
+    console.log(`[WebGPU Worker] ✅ Radial scanline complete: ${outputWidth} points`);
+    console.log(`[WebGPU Worker] First 10 values: ${Array.from(scanline.slice(0, 10)).map(v => v.toFixed(2)).join(',')}`);
+
+    return {
+        scanline
+    };
+}
+
 // Handle messages from main thread
 self.onmessage = async function(e) {
     const { type, data } = e.data;
@@ -1608,6 +1693,14 @@ self.onmessage = async function(e) {
                     type: 'toolpath-complete',
                     data: toolpathResult
                 }, [toolpathResult.pathData.buffer]);
+                break;
+
+            case 'generate-radial-scanline':
+                const scanlineResult = generateRadialScanline(data);
+                self.postMessage({
+                    type: 'radial-scanline-complete',
+                    data: scanlineResult
+                }, [scanlineResult.scanline.buffer]);
                 break;
 
             default:

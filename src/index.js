@@ -46,7 +46,12 @@ export class RasterPath {
         return new Promise((resolve, reject) => {
             try {
                 // Create worker from the webgpu-worker.js file
-                const workerPath = new URL('./web/webgpu-worker.js', import.meta.url);
+                // Support both source (src/index.js -> src/web/webgpu-worker.js)
+                // and build (build/raster-path.js -> build/webgpu-worker.js)
+                const isBuildVersion = import.meta.url.includes('/build/') || import.meta.url.includes('raster-path.js');
+                const workerPath = isBuildVersion
+                    ? new URL('./webgpu-worker.js', import.meta.url)
+                    : new URL('./web/webgpu-worker.js', import.meta.url);
                 this.worker = new Worker(workerPath, { type: 'module' });
 
                 // Set up message handler
@@ -144,6 +149,113 @@ export class RasterPath {
                 handler
             );
         });
+    }
+
+    /**
+     * Generate radial toolpath (lathe-like operation)
+     * Rotates terrain around X-axis, generates scanline at each angle
+     * @param {Float32Array} terrainTriangles - Terrain mesh triangles
+     * @param {Float32Array} toolPositions - Tool raster (sparse XYZ)
+     * @param {number} xRotationStep - Degrees between each rotation
+     * @param {number} xStep - Sampling step along X-axis
+     * @param {number} zFloor - Z floor value for out-of-bounds
+     * @param {number} gridStep - Rasterization resolution
+     * @param {object} terrainBounds - Terrain bounding box {min: {x,y,z}, max: {x,y,z}}
+     * @returns {Promise<{pathData: Float32Array, numRotations: number, pointsPerLine: number, rotationStepDegrees: number, generationTime: number}>}
+     */
+    async generateRadialToolpath(terrainTriangles, toolPositions, xRotationStep, xStep, zFloor, gridStep, terrainBounds) {
+        if (!this.isInitialized) {
+            throw new Error('RasterPath not initialized. Call init() first.');
+        }
+
+        const startTime = performance.now();
+
+        // Calculate tool radius from tool positions (sparse XYZ format)
+        let toolRadius = 0;
+        for (let i = 0; i < toolPositions.length; i += 3) {
+            const gridY = toolPositions[i + 1];
+            const yWorld = gridY * gridStep;
+            toolRadius = Math.max(toolRadius, Math.abs(yWorld));
+        }
+
+        // Generate rotation angles
+        const angles = [];
+        for (let angle = 0; angle < 360; angle += xRotationStep) {
+            angles.push(angle);
+        }
+
+        console.log(`Generating radial toolpath: ${angles.length} rotations at ${xRotationStep}° steps`);
+        console.log(`Tool radius: ${toolRadius.toFixed(2)}mm`);
+
+        // Process each rotation sequentially
+        const scanlines = [];
+        for (let i = 0; i < angles.length; i++) {
+            const angle = angles[i];
+            console.log(`Processing rotation ${i + 1}/${angles.length}: ${angle}°`);
+
+            // 1. Rotate terrain triangles
+            const rotatedTriangles = this._rotateTrianglesAroundX(terrainTriangles, angle);
+
+            // 2. Define strip bounds (full X, narrow Y band, full Z)
+            const stripBounds = {
+                min: {
+                    x: terrainBounds.min.x,
+                    y: -toolRadius,
+                    z: terrainBounds.min.z
+                },
+                max: {
+                    x: terrainBounds.max.x,
+                    y: toolRadius,
+                    z: terrainBounds.max.z
+                }
+            };
+
+            // 3. Rasterize strip
+            const stripRaster = await this.rasterizeMesh(rotatedTriangles, gridStep, 0, stripBounds);
+
+            // 4. Generate scanline from strip
+            const scanlineData = await new Promise((resolve, reject) => {
+                const handler = (data) => {
+                    resolve(data);
+                };
+
+                this._sendMessage(
+                    'generate-radial-scanline',
+                    {
+                        stripPositions: stripRaster.positions,
+                        stripBounds: stripRaster.bounds,
+                        toolPositions,
+                        xStep,
+                        zFloor,
+                        gridStep
+                    },
+                    'radial-scanline-complete',
+                    handler
+                );
+            });
+
+            scanlines.push(scanlineData.scanline);
+        }
+
+        const endTime = performance.now();
+        const generationTime = endTime - startTime;
+
+        // Combine scanlines into single Float32Array
+        const pointsPerLine = scanlines[0].length;
+        const pathData = new Float32Array(angles.length * pointsPerLine);
+        for (let i = 0; i < scanlines.length; i++) {
+            pathData.set(scanlines[i], i * pointsPerLine);
+        }
+
+        console.log(`✅ Radial toolpath complete: ${angles.length} rotations × ${pointsPerLine} points in ${generationTime.toFixed(1)}ms`);
+
+        return {
+            pathData,
+            numRotations: angles.length,
+            pointsPerLine,
+            rotationStepDegrees: xRotationStep,
+            generationTime
+        };
     }
 
     /**
@@ -350,7 +462,27 @@ export class RasterPath {
 
         return triangles;
     }
+
+    _rotateTrianglesAroundX(triangles, angleDegrees) {
+        const rad = angleDegrees * Math.PI / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+        const rotated = new Float32Array(triangles.length);
+
+        // Rotate each vertex: X stays same, Y and Z rotate
+        for (let i = 0; i < triangles.length; i += 3) {
+            const x = triangles[i];
+            const y = triangles[i + 1];
+            const z = triangles[i + 2];
+
+            rotated[i] = x;                      // X unchanged
+            rotated[i + 1] = y * cos - z * sin;  // Y' = Y*cos - Z*sin
+            rotated[i + 2] = y * sin + z * cos;  // Z' = Y*sin + Z*cos
+        }
+
+        return rotated;
+    }
 }
 
-// Export helper for direct worker access if needed
-export { default as WebGPUWorker } from './web/webgpu-worker.js';
+// Note: Direct worker export removed to support both src and build directory structures
+// The worker is managed internally by the RasterPath class

@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "npm run clean && npm run build:web",
-    "build:web": "mkdir -p build && cp src/web/* build/",
+    "build:web": "mkdir -p build && cp src/web/* build/ && cp src/index.js build/raster-path.js",
     "clean": "rm -rf build/",
     "dev": "npm run build && npm run serve -- -p 9090",
     "serve": "npx serve build",
@@ -17,6 +17,7 @@
     "test:regression": "npm run build && electron src/test/regression-test.cjs",
     "test:toolpath": "npm run build && electron src/test/toolpath-regression.cjs",
     "test:tiled": "npm run build && electron src/test/toolpath-tiled-test.cjs",
+    "test:radial": "npm run build && electron src/test/radial-toolpath-test.cjs",
     "test:webgpu": "npm run build && electron src/test/electron-test.js"
   },
   "keywords": [

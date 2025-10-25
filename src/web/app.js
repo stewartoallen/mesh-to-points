@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { parseSTL } from './parse-stl.js?v=1';
+import { RasterPath } from './raster-path.js';
 
 // Configuration
 let STEP_SIZE = 0.1; // mm (default, can be changed via dropdown)
@@ -28,15 +29,22 @@ const boundsMaxZ = document.getElementById('bounds-max-z');
 const boundsFromSTLBtn = document.getElementById('bounds-from-stl-btn');
 const boundsAddPaddingBtn = document.getElementById('bounds-add-padding-btn');
 
+// Mode switch elements
+const toolpathModeRadios = document.getElementsByName('toolpath-mode');
+
 // Toolpath UI elements
 const toolFileInput = document.getElementById('tool-file-input');
 const toolFilenameEl = document.getElementById('tool-filename');
 const xStepInput = document.getElementById('x-step-input');
 const yStepInput = document.getElementById('y-step-input');
+const yStepControl = document.getElementById('y-step-control');
+const xRotationStepInput = document.getElementById('x-rotation-step-input');
+const xRotationStepControl = document.getElementById('x-rotation-step-control');
 const zFloorInput = document.getElementById('z-floor-input');
 const generateToolpathBtn = document.getElementById('generate-toolpath-btn');
 const clearToolpathBtn = document.getElementById('clear-toolpath-btn');
 const showTerrainCheckbox = document.getElementById('show-terrain');
+const showTerrainLabel = document.getElementById('show-terrain-label');
 
 // Timing panel elements
 const timingPanel = document.getElementById('timing-panel');
@@ -56,17 +64,23 @@ let lastLoadedFile = null;
 // Three.js scene setup
 let scene, camera, renderer, controls;
 let pointCloud = null;
+let terrainMesh = null;  // For radial mode mesh display
 let toolCloud = null;
 let toolpathCloud = null;
 let terrainWorker = null;
 let toolWorker = null;
 let toolpathWorker = null;
 
+// Toolpath mode: 'planar' or 'radial'
+let toolpathMode = 'planar';
+
 // Store terrain and tool data for toolpath generation
 let terrainData = null;
+let terrainTriangles = null;  // Store original triangles for radial mode
 let toolData = null;
 let toolFile = null;
 let webgpuWorker = null;
+let rasterPath = null;  // RasterPath API instance for radial mode
 
 // Store STL bounds for bounds override feature
 let stlBounds = null;
@@ -148,6 +162,7 @@ const SETTINGS_KEY = 'raster-path-settings';
 function saveSettings() {
     const settings = {
         stepSize: stepSizeSelect.value,
+        toolpathMode: toolpathMode,
         useBoundsOverride: useBoundsOverride.checked,
         boundsMinX: boundsMinX.value,
         boundsMinY: boundsMinY.value,
@@ -157,6 +172,7 @@ function saveSettings() {
         boundsMaxZ: boundsMaxZ.value,
         xStep: xStepInput.value,
         yStep: yStepInput.value,
+        xRotationStep: xRotationStepInput.value,
         zFloor: zFloorInput.value
     };
 
@@ -181,6 +197,24 @@ function loadSettings() {
             STEP_SIZE = parseFloat(settings.stepSize);
         }
 
+        // Restore toolpath mode
+        if (settings.toolpathMode) {
+            toolpathMode = settings.toolpathMode;
+            toolpathModeRadios.forEach(radio => {
+                radio.checked = (radio.value === toolpathMode);
+            });
+            // Show/hide appropriate controls and update label
+            if (toolpathMode === 'radial') {
+                showTerrainLabel.textContent = 'Show Model';
+                yStepControl.style.display = 'none';
+                xRotationStepControl.style.display = 'flex';
+            } else {
+                showTerrainLabel.textContent = 'Show Terrain';
+                yStepControl.style.display = 'flex';
+                xRotationStepControl.style.display = 'none';
+            }
+        }
+
         // Restore bounds override
         if (settings.useBoundsOverride !== undefined) {
             useBoundsOverride.checked = settings.useBoundsOverride;
@@ -198,6 +232,7 @@ function loadSettings() {
         // Restore toolpath settings
         if (settings.xStep) xStepInput.value = settings.xStep;
         if (settings.yStep) yStepInput.value = settings.yStep;
+        if (settings.xRotationStep) xRotationStepInput.value = settings.xRotationStep;
         if (settings.zFloor) zFloorInput.value = settings.zFloor;
 
         console.log('Settings restored');
@@ -534,6 +569,15 @@ async function initWorkers() {
 
     console.log('✓ WebGPU worker initialized');
 
+    // Initialize RasterPath API for radial mode
+    try {
+        rasterPath = new RasterPath();
+        await rasterPath.init();
+        console.log('✓ RasterPath API initialized');
+    } catch (error) {
+        console.error('Failed to initialize RasterPath API:', error);
+    }
+
     // Auto-load last files from localStorage
     setTimeout(() => {
         const terrainFile = loadFileFromLocalStorage('lastTerrainFile');
@@ -817,6 +861,84 @@ function displayPointCloud(data) {
     console.log(`Point cloud created: ${pointCount} points`);
 }
 
+// Display terrain as mesh (for radial mode)
+function displayTerrainMesh(triangles, bounds) {
+    const renderStart = performance.now();
+    console.log('displayTerrainMesh: received', triangles.length / 9, 'triangles,', triangles.byteLength, 'bytes');
+
+    // Track if this is the first load (to reset camera)
+    const isFirstLoad = terrainMesh === null && pointCloud === null;
+
+    // Remove existing point cloud if present
+    if (pointCloud) {
+        scene.remove(pointCloud);
+        pointCloud.geometry.dispose();
+        pointCloud.material.dispose();
+        pointCloud = null;
+    }
+
+    // Remove existing mesh
+    if (terrainMesh) {
+        scene.remove(terrainMesh);
+        terrainMesh.geometry.dispose();
+        terrainMesh.material.dispose();
+    }
+
+    // Create geometry from triangles
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(triangles, 3));
+    geometry.computeVertexNormals();
+
+    // Create material
+    const material = new THREE.MeshPhongMaterial({
+        color: 0x00ffff,
+        flatShading: true,
+        side: THREE.DoubleSide
+    });
+
+    // Create mesh
+    terrainMesh = new THREE.Mesh(geometry, material);
+
+    // Rotate -π/2 around X axis to correct orientation
+    terrainMesh.rotation.x = -Math.PI / 2;
+
+    scene.add(terrainMesh);
+
+    // Update info panel
+    const triangleCount = triangles.length / 9;
+    pointCountEl.textContent = `${triangleCount.toLocaleString()} triangles`;
+    boundsEl.textContent = `${formatBounds(bounds.min)} to ${formatBounds(bounds.max)}`;
+    infoPanel.classList.remove('hidden');
+
+    // Only reset camera on first load
+    if (isFirstLoad) {
+        const center = new THREE.Vector3(
+            (bounds.min.x + bounds.max.x) / 2,
+            (bounds.min.y + bounds.max.y) / 2,
+            (bounds.min.z + bounds.max.z) / 2
+        );
+
+        const size = Math.max(
+            bounds.max.x - bounds.min.x,
+            bounds.max.y - bounds.min.y,
+            bounds.max.z - bounds.min.z
+        );
+
+        camera.position.set(
+            center.x + size,
+            center.y + size,
+            center.z + size
+        );
+
+        controls.target.copy(center);
+        controls.update();
+    }
+
+    const renderTotal = performance.now() - renderStart;
+    console.log('displayTerrainMesh: TOTAL render creation took', renderTotal.toFixed(2), 'ms');
+    console.log(`Mesh created: ${triangleCount} triangles`);
+}
+
 function formatBounds(vec) {
     return `(${vec.x.toFixed(2)}, ${vec.y.toFixed(2)}, ${vec.z.toFixed(2)})`;
 }
@@ -957,7 +1079,7 @@ function updateTimingPanel() {
 // Display toolpath in scene
 function displayToolpath(data) {
     console.log('displayToolpath: received data', data);
-    const { pathData, numScanlines, pointsPerLine } = data;
+    const { pathData, numScanlines, pointsPerLine, isRadial, rotationStepDegrees } = data;
 
     // Remove existing toolpath cloud
     if (toolpathCloud) {
@@ -986,32 +1108,70 @@ function displayToolpath(data) {
     const zFloor = parseFloat(zFloorInput.value);
 
     console.log('displayToolpath: bounds', bounds);
-    console.log('displayToolpath: gridStep', gridStep, 'xStep', xStep, 'yStep', yStep);
+    console.log('displayToolpath: mode', isRadial ? 'radial' : 'planar');
+    console.log('displayToolpath: gridStep', gridStep, 'xStep', xStep, isRadial ? 'rotationStep' : 'yStep', isRadial ? rotationStepDegrees : yStep);
     console.log('displayToolpath: scanlines', numScanlines, 'pointsPerLine', pointsPerLine);
-    console.log('displayToolpath: terrain grid dimensions from bounds:',
-        'width =', (bounds.max.x - bounds.min.x) / gridStep,
-        'height =', (bounds.max.y - bounds.min.y) / gridStep);
 
     // Create position array for toolpath points
     const positions = [];
 
     let pathIdx = 0;
-    for (let iy = 0; iy < numScanlines; iy++) {
-        for (let ix = 0; ix < pointsPerLine; ix++) {
-            const z = pathData[pathIdx++];
 
-            // Map grid indices to world coordinates
-            // The toolpath uses stepped indices (ix*xStep, iy*yStep) in grid space
-            const gridX = ix * xStep;
-            const gridY = iy * yStep;
+    if (isRadial) {
+        // Radial mode: scanlines are at different rotation angles
+        // Each point needs to be rotated back into 3D space
+        console.log('displayToolpath: radial mode with', numScanlines, 'rotations');
 
-            // Convert grid indices to world coordinates
-            const worldX = bounds.min.x + gridX * gridStep;
-            const worldY = bounds.min.y + gridY * gridStep;
+        for (let rotationIdx = 0; rotationIdx < numScanlines; rotationIdx++) {
+            const angleDegrees = rotationIdx * rotationStepDegrees;
+            const angleRad = angleDegrees * Math.PI / 180;
+            const cosAngle = Math.cos(angleRad);
+            const sinAngle = Math.sin(angleRad);
 
-            // Only add points that are not at the floor level (filter out oob points)
-            if (z > zFloor + 10) { // Filter out oob points (with 10mm margin)
-                positions.push(worldX, worldY, z);
+            for (let ix = 0; ix < pointsPerLine; ix++) {
+                const z = pathData[pathIdx++];
+
+                // Skip floor values
+                if (z <= zFloor + 1) continue;
+
+                // Grid X position (along the rotation axis)
+                const gridX = ix * xStep;
+                const worldX = bounds.min.x + gridX * gridStep;
+
+                // Transform point (x, 0, z) by rotating back by -angle around X axis
+                // In the strip coordinate system, the scanline is at y=0
+                // To rotate back by -angle: (x, -y*sin + z*cos(-θ), y*cos + z*sin(-θ))
+                // At y=0: (x, z*sin(θ), z*cos(θ))
+                const worldY = z * sinAngle;
+                const worldZ = z * cosAngle;
+
+                positions.push(worldX, worldY, worldZ);
+            }
+        }
+    } else {
+        // Planar mode: grid-based scanlines
+        console.log('displayToolpath: planar mode');
+        console.log('displayToolpath: terrain grid dimensions from bounds:',
+            'width =', (bounds.max.x - bounds.min.x) / gridStep,
+            'height =', (bounds.max.y - bounds.min.y) / gridStep);
+
+        for (let iy = 0; iy < numScanlines; iy++) {
+            for (let ix = 0; ix < pointsPerLine; ix++) {
+                const z = pathData[pathIdx++];
+
+                // Map grid indices to world coordinates
+                // The toolpath uses stepped indices (ix*xStep, iy*yStep) in grid space
+                const gridX = ix * xStep;
+                const gridY = iy * yStep;
+
+                // Convert grid indices to world coordinates
+                const worldX = bounds.min.x + gridX * gridStep;
+                const worldY = bounds.min.y + gridY * gridStep;
+
+                // Only add points that are not at the floor level (filter out oob points)
+                if (z > zFloor + 10) { // Filter out oob points (with 10mm margin)
+                    positions.push(worldX, worldY, z);
+                }
             }
         }
     }
@@ -1042,9 +1202,9 @@ function displayToolpath(data) {
 
     // Create material - use red/orange color for toolpath
     // Scale point size based on the actual step values used
-    const effectiveStep = Math.min(xStep, yStep) * gridStep;
+    const effectiveStep = isRadial ? xStep * gridStep : Math.min(xStep, yStep) * gridStep;
     const pointSize = effectiveStep * 1.2; // 20% larger than effective step for visibility
-    console.log('displayToolpath: point size', pointSize.toFixed(3), 'mm (xStep:', xStep, 'yStep:', yStep, 'gridStep:', gridStep, ')');
+    console.log('displayToolpath: point size', pointSize.toFixed(3), 'mm (xStep:', xStep, isRadial ? '' : 'yStep: ' + yStep, 'gridStep:', gridStep, ')');
 
     const material = new THREE.PointsMaterial({
         size: pointSize,
@@ -1151,26 +1311,108 @@ async function processFileWebGPU(file) {
         updateStatus('Parsing STL...');
         const { positions, triangleCount, bounds } = parseSTL(buffer);
         console.log('Parsed STL:', triangleCount, 'triangles');
+        console.log('Original bounds:', bounds);
+
+        // Center the model based on mode
+        let centeredPositions;
+        let centeredBounds;
+
+        if (toolpathMode === 'radial') {
+            // Radial mode: center XYZ at origin for proper rotation
+            const centerX = (bounds.min.x + bounds.max.x) / 2;
+            const centerY = (bounds.min.y + bounds.max.y) / 2;
+            const centerZ = (bounds.min.z + bounds.max.z) / 2;
+
+            centeredPositions = new Float32Array(positions.length);
+            for (let i = 0; i < positions.length; i += 3) {
+                centeredPositions[i] = positions[i] - centerX;
+                centeredPositions[i + 1] = positions[i + 1] - centerY;
+                centeredPositions[i + 2] = positions[i + 2] - centerZ;
+            }
+
+            centeredBounds = {
+                min: {
+                    x: bounds.min.x - centerX,
+                    y: bounds.min.y - centerY,
+                    z: bounds.min.z - centerZ
+                },
+                max: {
+                    x: bounds.max.x - centerX,
+                    y: bounds.max.y - centerY,
+                    z: bounds.max.z - centerZ
+                }
+            };
+
+            console.log('Radial mode: centered model at origin (XYZ)');
+        } else {
+            // Planar mode: center XY, keep Z min at 0
+            const centerX = (bounds.min.x + bounds.max.x) / 2;
+            const centerY = (bounds.min.y + bounds.max.y) / 2;
+            const minZ = bounds.min.z;
+
+            centeredPositions = new Float32Array(positions.length);
+            for (let i = 0; i < positions.length; i += 3) {
+                centeredPositions[i] = positions[i] - centerX;
+                centeredPositions[i + 1] = positions[i + 1] - centerY;
+                centeredPositions[i + 2] = positions[i + 2] - minZ;
+            }
+
+            centeredBounds = {
+                min: {
+                    x: bounds.min.x - centerX,
+                    y: bounds.min.y - centerY,
+                    z: 0
+                },
+                max: {
+                    x: bounds.max.x - centerX,
+                    y: bounds.max.y - centerY,
+                    z: bounds.max.z - minZ
+                }
+            };
+
+            console.log('Planar mode: centered XY, Z min at 0');
+        }
+
+        console.log('Centered bounds:', centeredBounds);
 
         // Store STL bounds for bounds override feature
-        stlBounds = bounds;
+        stlBounds = centeredBounds;
 
-        updateStatus('Rasterizing with WebGPU...');
+        // Store triangles for radial mode
+        terrainTriangles = new Float32Array(centeredPositions);
 
-        // Get bounds override if enabled
-        const boundsOverride = getBoundsOverride();
+        if (toolpathMode === 'radial') {
+            // Radial mode: Display as mesh, skip rasterization for now
+            updateStatus('Displaying mesh...');
+            displayTerrainMesh(terrainTriangles, centeredBounds);
+            updateStatus('Terrain loaded (radial mode)');
 
-        // Send to WebGPU worker
-        webgpuWorker.postMessage({
-            type: 'rasterize',
-            data: {
-                triangles: positions,
-                stepSize: STEP_SIZE,
-                filterMode: 0, // 0 = UPWARD_FACING for terrain
-                isForTool: false,
-                boundsOverride
+            // Set terrainData with bounds for button state management
+            terrainData = { bounds: centeredBounds };
+
+            // Enable generate button if tool is loaded
+            if (toolData) {
+                generateToolpathBtn.disabled = false;
             }
-        }, [positions.buffer]);
+        } else {
+            // Planar mode: Rasterize with WebGPU
+            updateStatus('Rasterizing with WebGPU...');
+
+            // Get bounds override if enabled
+            const boundsOverride = getBoundsOverride();
+
+            // Send to WebGPU worker
+            webgpuWorker.postMessage({
+                type: 'rasterize',
+                data: {
+                    triangles: centeredPositions,
+                    stepSize: STEP_SIZE,
+                    filterMode: 0, // 0 = UPWARD_FACING for terrain
+                    isForTool: false,
+                    boundsOverride
+                }
+            }, [centeredPositions.buffer]);
+        }
     } catch (error) {
         console.error('Error processing file with WebGPU:', error);
         updateStatus('Error: ' + error.message);
@@ -1467,45 +1709,102 @@ async function generateToolpathParallel(terrainPoints, toolPoints, xStep, yStep,
 }
 
 generateToolpathBtn.addEventListener('click', async () => {
-    if (!terrainData || !toolData) {
-        alert('Please load both terrain and tool STL files first');
-        return;
-    }
+    if (toolpathMode === 'radial') {
+        // Radial mode: Check for terrain triangles and tool data
+        if (!terrainTriangles || !toolData) {
+            alert('Please load both terrain and tool STL files first');
+            return;
+        }
 
-    console.log('🎯 Starting toolpath generation (webgpu)...');
-    updateStatus('Generating toolpath (webgpu)...');
+        if (!rasterPath) {
+            alert('RasterPath API not initialized');
+            return;
+        }
 
-    // Disable button during processing
-    generateToolpathBtn.disabled = true;
+        console.log('🎯 Starting radial toolpath generation...');
+        updateStatus('Generating radial toolpath...');
 
-    try {
-        const xStep = parseInt(xStepInput.value);
-        const yStep = parseInt(yStepInput.value);
-        const zFloor = parseFloat(zFloorInput.value);
+        // Disable button during processing
+        generateToolpathBtn.disabled = true;
 
-        console.log('Parameters: X step:', xStep, 'Y step:', yStep, 'Z floor:', zFloor, 'Grid step:', STEP_SIZE);
+        try {
+            const xStep = parseInt(xStepInput.value);
+            const xRotationStep = parseFloat(xRotationStepInput.value);
+            const zFloor = parseFloat(zFloorInput.value);
 
-        // Send to WebGPU worker (COPY data, don't transfer - we need to keep it)
-        webgpuWorker.postMessage({
-            type: 'generate-toolpath',
-            data: {
-                terrainPoints: terrainData.positions,
-                toolPoints: toolData.positions,
+            console.log('Radial Parameters: X step:', xStep, 'Rotation step:', xRotationStep, 'Z floor:', zFloor, 'Grid step:', STEP_SIZE);
+
+            // Call radial toolpath generation
+            const result = await rasterPath.generateRadialToolpath(
+                terrainTriangles,
+                toolData.positions,
+                xRotationStep,
                 xStep,
-                yStep,
-                oobZ: zFloor,
-                gridStep: STEP_SIZE,
-                terrainBounds: terrainData.bounds // Pass terrain bounds for correct coordinate system
-            }
-        });
-        // Result will be handled by the worker message handler
-        return; // Exit early since async
+                zFloor,
+                STEP_SIZE,
+                stlBounds
+            );
 
-    } catch (error) {
-        console.error('Error generating toolpath:', error);
-        updateStatus('Error: ' + error.message);
-        alert('Error generating toolpath: ' + error.message);
-        generateToolpathBtn.disabled = false;
+            console.log('Radial toolpath complete:', result);
+
+            // Handle the result
+            handleToolpathComplete({
+                pathData: result.pathData,
+                numScanlines: result.numRotations,
+                pointsPerLine: result.pointsPerLine,
+                generationTime: result.generationTime,
+                isRadial: true,
+                rotationStepDegrees: result.rotationStepDegrees
+            });
+
+        } catch (error) {
+            console.error('Error generating radial toolpath:', error);
+            updateStatus('Error: ' + error.message);
+            alert('Error generating radial toolpath: ' + error.message);
+            generateToolpathBtn.disabled = false;
+        }
+
+    } else {
+        // Planar mode: existing implementation
+        if (!terrainData || !toolData) {
+            alert('Please load both terrain and tool STL files first');
+            return;
+        }
+
+        console.log('🎯 Starting toolpath generation (planar)...');
+        updateStatus('Generating toolpath (planar)...');
+
+        // Disable button during processing
+        generateToolpathBtn.disabled = true;
+
+        try {
+            const xStep = parseInt(xStepInput.value);
+            const yStep = parseInt(yStepInput.value);
+            const zFloor = parseFloat(zFloorInput.value);
+
+            console.log('Planar Parameters: X step:', xStep, 'Y step:', yStep, 'Z floor:', zFloor, 'Grid step:', STEP_SIZE);
+
+            // Send to WebGPU worker (COPY data, don't transfer - we need to keep it)
+            webgpuWorker.postMessage({
+                type: 'generate-toolpath',
+                data: {
+                    terrainPoints: terrainData.positions,
+                    toolPoints: toolData.positions,
+                    xStep,
+                    yStep,
+                    oobZ: zFloor,
+                    gridStep: STEP_SIZE,
+                    terrainBounds: terrainData.bounds // Pass terrain bounds for correct coordinate system
+                }
+            });
+            // Result will be handled by the worker message handler
+
+        } catch (error) {
+            console.error('Error generating planar toolpath:', error);
+            updateStatus('Error: ' + error.message);
+            alert('Error generating planar toolpath: ' + error.message);
+            generateToolpathBtn.disabled = false;
+        }
     }
 });
 
@@ -1521,11 +1820,67 @@ clearToolpathBtn.addEventListener('click', () => {
     }
 });
 
+// Mode switch handler
+toolpathModeRadios.forEach(radio => {
+    radio.addEventListener('change', (e) => {
+        toolpathMode = e.target.value;
+        console.log('Toolpath mode switched to:', toolpathMode);
+
+        // Update label based on mode
+        if (toolpathMode === 'radial') {
+            showTerrainLabel.textContent = 'Show Model';
+            yStepControl.style.display = 'none';
+            xRotationStepControl.style.display = 'flex';
+        } else {
+            showTerrainLabel.textContent = 'Show Terrain';
+            yStepControl.style.display = 'flex';
+            xRotationStepControl.style.display = 'none';
+        }
+
+        // Clear existing displays
+        if (pointCloud) {
+            scene.remove(pointCloud);
+            pointCloud.geometry.dispose();
+            pointCloud.material.dispose();
+            pointCloud = null;
+        }
+        if (terrainMesh) {
+            scene.remove(terrainMesh);
+            terrainMesh.geometry.dispose();
+            terrainMesh.material.dispose();
+            terrainMesh = null;
+        }
+        if (toolpathCloud) {
+            scene.remove(toolpathCloud);
+            toolpathCloud.geometry.dispose();
+            toolpathCloud.material.dispose();
+            toolpathCloud = null;
+            clearToolpathBtn.disabled = true;
+        }
+
+        // Clear terrain data
+        terrainData = null;
+        generateToolpathBtn.disabled = true;
+
+        // Reload terrain if already loaded to switch display mode
+        if (lastLoadedFile) {
+            console.log('Reloading terrain in', toolpathMode, 'mode');
+            processFileWebGPU(lastLoadedFile);
+        }
+
+        saveSettings();
+    });
+});
+
 // Show/hide terrain toggle
 showTerrainCheckbox.addEventListener('change', (e) => {
     if (pointCloud) {
         pointCloud.visible = e.target.checked;
         console.log('Terrain visibility:', e.target.checked);
+    }
+    if (terrainMesh) {
+        terrainMesh.visible = e.target.checked;
+        console.log('Terrain mesh visibility:', e.target.checked);
     }
 });
 

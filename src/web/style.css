@@ -496,6 +496,29 @@ body {
     accent-color: #00ffff;
 }
 
+/* Mode Controls */
+.mode-control {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+}
+
+.mode-control label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: #ffffff;
+    cursor: pointer;
+}
+
+.mode-control input[type="radio"] {
+    cursor: pointer;
+    width: 16px;
+    height: 16px;
+    accent-color: #00ffff;
+}
+
 /* Visibility Controls */
 .visibility-control {
     margin-top: 12px;
