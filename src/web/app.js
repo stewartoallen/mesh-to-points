@@ -939,7 +939,7 @@ function displayTerrainMesh(triangles, bounds) {
 
     // Create material
     const material = new THREE.MeshPhongMaterial({
-        color: 0x00ffff,
+        color: 0xdddddd,
         flatShading: true,
         side: THREE.DoubleSide
     });
@@ -1170,6 +1170,8 @@ function displayToolpath(data) {
         // Radial mode: scanlines are at different rotation angles
         // Each point needs to be rotated back into 3D space
         console.log('displayToolpath: radial mode with', numScanlines, 'rotations');
+        console.log('displayToolpath: pathData length', pathData.length, 'first 20 values:', Array.from(pathData.slice(0, 20)).map(v => v.toFixed(3)).join(', '));
+        console.log('displayToolpath: zFloor', zFloor);
 
         for (let rotationIdx = 0; rotationIdx < numScanlines; rotationIdx++) {
             const angleDegrees = rotationIdx * rotationStepDegrees;
@@ -1197,6 +1199,7 @@ function displayToolpath(data) {
                 positions.push(worldX, worldY, worldZ);
             }
         }
+        console.log('displayToolpath: radial generated', positions.length / 3, 'visible points (filtered', pathData.length - positions.length / 3, 'floor values)');
     } else {
         // Planar mode: grid-based scanlines
         console.log('displayToolpath: planar mode');

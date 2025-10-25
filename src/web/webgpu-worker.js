@@ -8,6 +8,8 @@ let cachedRasterizePipeline = null;
 let cachedRasterizeShaderModule = null;
 let cachedToolpathPipeline = null;
 let cachedToolpathShaderModule = null;
+let cachedBatchedRadialPipeline = null;
+let cachedBatchedRadialShaderModule = null;
 let config = null;
 let deviceCapabilities = null;
 
@@ -64,6 +66,23 @@ async function initWebGPU() {
             layout: 'auto',
             compute: { module: cachedToolpathShaderModule, entryPoint: 'main' },
         });
+
+        // Pre-compile batched radial shader module
+        device.pushErrorScope('validation');
+        cachedBatchedRadialShaderModule = device.createShaderModule({ code: batchedRadialShaderCode });
+
+        // Pre-create batched radial pipeline
+        cachedBatchedRadialPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: cachedBatchedRadialShaderModule, entryPoint: 'main' },
+        });
+
+        const shaderError = await device.popErrorScope();
+        if (shaderError) {
+            console.error('[WebGPU Worker] Batched radial shader compilation error:', shaderError.message);
+        } else {
+            console.log('[WebGPU Worker] ✓ Batched radial shader compiled successfully');
+        }
 
         // Store device capabilities
         deviceCapabilities = {
@@ -384,6 +403,184 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let output_idx = scanline * uniforms.points_per_line + point_idx;
     output_path[output_idx] = output_z;
+}
+`;
+
+// Batched radial toolpath shader - processes all angles in one GPU dispatch
+const batchedRadialShaderCode = `
+const EMPTY_CELL: f32 = -1e10;
+const EPSILON: f32 = 0.0000001;
+
+struct SparseToolPoint {
+    x_offset: i32,
+    y_offset: i32,
+    z_value: f32,
+    padding: f32,
+}
+
+struct Uniforms {
+    num_triangles: u32,
+    num_angles: u32,
+    num_tool_points: u32,
+    points_per_line: u32,
+    x_step: u32,
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+    min_z: f32,
+    max_z: f32,
+    grid_step: f32,
+    tool_radius: f32,
+    z_floor: f32,
+    spatial_grid_width: u32,
+    spatial_grid_height: u32,
+    spatial_cell_size: f32,
+    padding: f32,  // Align to 16 bytes
+}
+
+@group(0) @binding(0) var<storage, read> triangles: array<f32>;
+@group(0) @binding(1) var<storage, read> angles: array<f32>;
+@group(0) @binding(2) var<storage, read> tool_points: array<SparseToolPoint>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> uniforms: Uniforms;
+
+// Rotate point around X-axis
+fn rotateAroundX(pos: vec3<f32>, cos_a: f32, sin_a: f32) -> vec3<f32> {
+    return vec3<f32>(
+        pos.x,
+        pos.y * cos_a - pos.z * sin_a,
+        pos.y * sin_a + pos.z * cos_a
+    );
+}
+
+// Ray-triangle intersection (Möller-Trumbore)
+fn rayTriangleIntersect(
+    ray_origin: vec3<f32>,
+    ray_dir: vec3<f32>,
+    v0: vec3<f32>,
+    v1: vec3<f32>,
+    v2: vec3<f32>
+) -> vec2<f32> {  // Returns (hit: 0 or 1, t: distance)
+    let edge1 = v1 - v0;
+    let edge2 = v2 - v0;
+    let h = cross(ray_dir, edge2);
+    let a = dot(edge1, h);
+
+    if (a > -EPSILON && a < EPSILON) {
+        return vec2<f32>(0.0, 0.0);
+    }
+
+    let f = 1.0 / a;
+    let s = ray_origin - v0;
+    let u = f * dot(s, h);
+
+    if (u < -EPSILON || u > 1.0 + EPSILON) {
+        return vec2<f32>(0.0, 0.0);
+    }
+
+    let q = cross(s, edge1);
+    let v = f * dot(ray_dir, q);
+
+    if (v < -EPSILON || u + v > 1.0 + EPSILON) {
+        return vec2<f32>(0.0, 0.0);
+    }
+
+    let t = f * dot(edge2, q);
+
+    if (t > EPSILON) {
+        return vec2<f32>(1.0, t);
+    }
+
+    return vec2<f32>(0.0, 0.0);
+}
+
+// Ray-cast to find terrain height at (world_x, world_y) with rotated triangles
+fn raycastRotatedTerrain(
+    world_x: f32,
+    world_y: f32,
+    cos_a: f32,
+    sin_a: f32
+) -> f32 {
+    let ray_origin = vec3<f32>(world_x, world_y, uniforms.min_z - 1.0);
+    let ray_dir = vec3<f32>(0.0, 0.0, 1.0);
+
+    var max_z = EMPTY_CELL;
+
+    // Test all triangles (with early exit for first hit to reduce Chrome timeout)
+    for (var tri_idx = 0u; tri_idx < uniforms.num_triangles; tri_idx++) {
+        let base = tri_idx * 9u;
+
+        // Read and rotate triangle vertices
+        var v0 = vec3<f32>(triangles[base], triangles[base + 1u], triangles[base + 2u]);
+        var v1 = vec3<f32>(triangles[base + 3u], triangles[base + 4u], triangles[base + 5u]);
+        var v2 = vec3<f32>(triangles[base + 6u], triangles[base + 7u], triangles[base + 8u]);
+
+        v0 = rotateAroundX(v0, cos_a, sin_a);
+        v1 = rotateAroundX(v1, cos_a, sin_a);
+        v2 = rotateAroundX(v2, cos_a, sin_a);
+
+        let result = rayTriangleIntersect(ray_origin, ray_dir, v0, v1, v2);
+
+        if (result.x > 0.5) {
+            let intersection_z = ray_origin.z + ray_dir.z * result.y;
+            max_z = max(max_z, intersection_z);
+            // Early exit after first hit to avoid timeout
+            break;
+        }
+    }
+
+    return max_z;
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let angle_idx = global_id.x;
+    let x_idx = global_id.y;
+
+    // Calculate output index first for diagnostics
+    let output_idx = angle_idx * uniforms.points_per_line + x_idx;
+
+    if (angle_idx >= uniforms.num_angles || x_idx >= uniforms.points_per_line) {
+        return;
+    }
+
+    // Get rotation angle
+    let angle_deg = angles[angle_idx];
+    let angle_rad = angle_deg * 3.14159265359 / 180.0;
+    let cos_a = cos(angle_rad);
+    let sin_a = sin(angle_rad);
+
+    // Calculate world X position for this scanline point (scanline is at Y=0)
+    let world_x = uniforms.min_x + f32(x_idx * uniforms.x_step) * uniforms.grid_step;
+    let world_y = 0.0;  // Scanline is always at Y=0
+
+    var min_delta = 3.402823466e+38;  // Float max
+
+    // Apply tool convolution: check terrain at each tool point offset
+    for (var tool_idx = 0u; tool_idx < uniforms.num_tool_points; tool_idx++) {
+        let tool = tool_points[tool_idx];
+
+        // Calculate terrain sample position (tool center + offset)
+        let terrain_x = world_x + f32(tool.x_offset) * uniforms.grid_step;
+        let terrain_y = world_y + f32(tool.y_offset) * uniforms.grid_step;
+
+        // Sample terrain at this position
+        let terrain_z = raycastRotatedTerrain(terrain_x, terrain_y, cos_a, sin_a);
+
+        if (terrain_z > EMPTY_CELL + 1.0) {
+            // Calculate clearance: tool Z - terrain Z
+            let delta = tool.z_value - terrain_z;
+            min_delta = min(min_delta, delta);
+        }
+    }
+
+    // Write output
+    if (min_delta < 3.402823466e+38) {
+        output[output_idx] = -min_delta;  // Tool center Z position
+    } else {
+        output[output_idx] = uniforms.z_floor;  // No terrain hit
+    }
 }
 `;
 
@@ -1670,6 +1867,179 @@ function generateRadialScanline(data) {
     };
 }
 
+// Batched radial toolpath generation - processes all angles in ONE GPU dispatch
+async function generateBatchedRadialToolpath(data) {
+    const { triangles, angles, toolPositions, xStep, zFloor, gridStep, terrainBounds } = data;
+
+    if (!isInitialized) {
+        await initWebGPU();
+    }
+
+    const startTime = performance.now();
+
+    // Calculate tool radius from tool bounds (convert grid indices to world coordinates)
+    let toolMinY = Infinity, toolMaxY = -Infinity;
+    for (let i = 1; i < toolPositions.length; i += 3) {
+        const worldY = toolPositions[i] * gridStep;  // Convert grid index to world coordinate
+        toolMinY = Math.min(toolMinY, worldY);
+        toolMaxY = Math.max(toolMaxY, worldY);
+    }
+    const toolRadius = Math.max(Math.abs(toolMinY), Math.abs(toolMaxY));
+    console.log(`[WebGPU Worker] Tool radius: ${toolRadius.toFixed(2)}mm (minY=${toolMinY.toFixed(2)}, maxY=${toolMaxY.toFixed(2)})`);
+    console.log(`[WebGPU Worker] Triangles: ${triangles.length / 9} triangles, first vertex: [${triangles[0].toFixed(2)}, ${triangles[1].toFixed(2)}, ${triangles[2].toFixed(2)}]`);
+
+    // Create sparse tool representation
+    const sparseToolData = createSparseToolFromPoints(toolPositions, gridStep);
+    console.log(`[WebGPU Worker] Sparse tool: ${sparseToolData.count} points, first Z values:`, sparseToolData.zValues.slice(0, 5).map(v => v.toFixed(3)).join(', '));
+
+    // Pack sparse tool into GPU format (SparseToolPoint struct: x_offset, y_offset, z_value, padding)
+    const toolBufferData = new ArrayBuffer(sparseToolData.count * 16);
+    const toolBufferI32 = new Int32Array(toolBufferData);
+    const toolBufferF32 = new Float32Array(toolBufferData);
+
+    for (let i = 0; i < sparseToolData.count; i++) {
+        toolBufferI32[i * 4 + 0] = sparseToolData.xOffsets[i];
+        toolBufferI32[i * 4 + 1] = sparseToolData.yOffsets[i];
+        toolBufferF32[i * 4 + 2] = sparseToolData.zValues[i];
+        toolBufferF32[i * 4 + 3] = 0;  // padding
+    }
+
+    // Calculate output dimensions
+    const xRange = terrainBounds.max.x - terrainBounds.min.x;
+    const pointsPerLine = Math.ceil(xRange / gridStep / xStep) + 1;
+    const numAngles = angles.length;
+
+    console.log(`[WebGPU Worker] Batched radial: ${numAngles} angles × ${pointsPerLine} points = ${numAngles * pointsPerLine} outputs`);
+    console.log(`[WebGPU Worker] Triangle buffer: ${triangles.byteLength} bytes, ${triangles.length} floats (${triangles.length/9} triangles)`);
+    if (triangles.length > 302) {
+        console.log(`[WebGPU Worker] Triangle sample - vertex 100: [${triangles[300].toFixed(2)}, ${triangles[301].toFixed(2)}, ${triangles[302].toFixed(2)}]`);
+    }
+
+    // Create buffers
+    const triangleBuffer = device.createBuffer({
+        size: triangles.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(triangleBuffer, 0, triangles);
+
+    const anglesBuffer = device.createBuffer({
+        size: angles.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(anglesBuffer, 0, angles);
+
+    const toolBuffer = device.createBuffer({
+        size: toolBufferData.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(toolBuffer, 0, toolBufferData);
+
+    const outputSize = numAngles * pointsPerLine;
+    const outputBuffer = device.createBuffer({
+        size: outputSize * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    // Initialize output buffer to -999 to verify shader writes
+    const initData = new Float32Array(outputSize).fill(-999);
+    device.queue.writeBuffer(outputBuffer, 0, initData);
+
+    // Uniforms
+    const uniformData = new Float32Array([
+        0, 0, 0, 0,  // num_triangles (u32), num_angles (u32), num_tool_points (u32), points_per_line (u32)
+        0,           // x_step (u32)
+        terrainBounds.min.x, terrainBounds.max.x,
+        -toolRadius, toolRadius,
+        terrainBounds.min.z, terrainBounds.max.z,
+        gridStep,
+        toolRadius,
+        zFloor,
+        0, 0,        // spatial_grid_width (u32), spatial_grid_height (u32)
+        0,           // spatial_cell_size (f32)
+        0,           // padding (f32)
+    ]);
+    const uniformDataU32 = new Uint32Array(uniformData.buffer);
+    uniformDataU32[0] = triangles.length / 9;
+    uniformDataU32[1] = numAngles;
+    uniformDataU32[2] = sparseToolData.count;
+    uniformDataU32[3] = pointsPerLine;
+    uniformDataU32[4] = xStep;
+
+    console.log(`[WebGPU Worker] Batched radial: ${numAngles} angles × ${pointsPerLine} points = ${outputSize} outputs`);
+    console.log(`[WebGPU Worker] Uniforms: numTriangles=${uniformDataU32[0]}, numAngles=${uniformDataU32[1]}, numToolPoints=${uniformDataU32[2]}`);
+    console.log(`[WebGPU Worker] Uniforms: pointsPerLine=${uniformDataU32[3]}, xStep=${uniformDataU32[4]}`);
+    console.log(`[WebGPU Worker] Uniforms: minX=${uniformData[5].toFixed(2)}, maxX=${uniformData[6].toFixed(2)}`);
+    console.log(`[WebGPU Worker] Uniforms: minY=${uniformData[7].toFixed(2)}, maxY=${uniformData[8].toFixed(2)}`);
+    console.log(`[WebGPU Worker] Uniforms: minZ=${uniformData[9].toFixed(2)}, maxZ=${uniformData[10].toFixed(2)}`);
+    console.log(`[WebGPU Worker] Uniforms: gridStep=${uniformData[11].toFixed(4)}, toolRadius=${uniformData[12].toFixed(2)}, zFloor=${uniformData[13].toFixed(2)}`);
+
+    const uniformBuffer = device.createBuffer({
+        size: uniformData.byteLength,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+    // Create bind group
+    const bindGroup = device.createBindGroup({
+        layout: cachedBatchedRadialPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: triangleBuffer } },
+            { binding: 1, resource: { buffer: anglesBuffer } },
+            { binding: 2, resource: { buffer: toolBuffer } },
+            { binding: 3, resource: { buffer: outputBuffer } },
+            { binding: 4, resource: { buffer: uniformBuffer } },
+        ],
+    });
+
+    // Dispatch compute shader
+    const workgroupsX = Math.ceil(numAngles / 16);
+    const workgroupsY = Math.ceil(pointsPerLine / 16);
+
+    console.log(`[WebGPU Worker] Dispatching ${workgroupsX}×${workgroupsY} workgroups (${workgroupsX * workgroupsY} total)`);
+
+    // Push error scope to catch validation errors
+    device.pushErrorScope('validation');
+    device.pushErrorScope('internal');
+    device.pushErrorScope('out-of-memory');
+
+    const commandEncoder = device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(cachedBatchedRadialPipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY);
+    passEncoder.end();
+
+    // Read back results
+    const resultBuffer = device.createBuffer({
+        size: outputSize * 4,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputBuffer, 0, resultBuffer, 0, outputSize * 4);
+    device.queue.submit([commandEncoder.finish()]);
+
+    // Check for errors
+    const memoryError = await device.popErrorScope();
+    const internalError = await device.popErrorScope();
+    const validationError = await device.popErrorScope();
+
+    if (memoryError) console.error('[WebGPU Worker] Memory error:', memoryError.message);
+    if (internalError) console.error('[WebGPU Worker] Internal error:', internalError.message);
+    if (validationError) console.error('[WebGPU Worker] Validation error:', validationError.message);
+
+    await resultBuffer.mapAsync(GPUMapMode.READ);
+    const result = new Float32Array(resultBuffer.getMappedRange()).slice();
+    resultBuffer.unmap();
+
+    const endTime = performance.now();
+    console.log(`[WebGPU Worker] ✅ Batched radial complete: ${numAngles}×${pointsPerLine} in ${(endTime - startTime).toFixed(1)}ms`);
+    console.log(`[WebGPU Worker] First 20 output values: ${Array.from(result.slice(0, 20)).map(v => v.toFixed(3)).join(', ')}`);
+
+    return {
+        pathData: result,
+        numRotations: numAngles,
+        pointsPerLine
+    };
+}
+
 // Handle messages from main thread
 self.onmessage = async function(e) {
     const { type, data } = e.data;
@@ -1728,6 +2098,14 @@ self.onmessage = async function(e) {
                     type: 'radial-scanline-complete',
                     data: scanlineResult
                 }, [scanlineResult.scanline.buffer]);
+                break;
+
+            case 'generate-batched-radial':
+                const batchedResult = await generateBatchedRadialToolpath(data);
+                self.postMessage({
+                    type: 'batched-radial-complete',
+                    data: batchedResult
+                }, [batchedResult.pathData.buffer]);
                 break;
 
             default:

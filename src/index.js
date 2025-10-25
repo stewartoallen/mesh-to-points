@@ -258,14 +258,31 @@ export class RasterPath {
         console.log(`Generating radial toolpath: ${angles.length} rotations at ${xRotationStep}° steps`);
         console.log(`Tool radius: ${toolRadius.toFixed(2)}mm`);
 
-        // Try to use parallel processing if worker pool is initialized
-        if (this.workerPool.length > 0 && angles.length >= this.workerPool.length) {
-            console.log(`[RasterPath] Using parallel processing with ${this.workerPool.length} workers`);
+        // TEMPORARY: Only use batched GPU in Electron due to Chrome timeout issues
+        // Chrome WebGPU has stricter execution time limits than Electron
+        // The batched shader tests 75K triangles × 7.8K tool points which exceeds Chrome's limit
+        // TODO: Fix with rotation-aware spatial partitioning or bounding sphere culling
+        const isElectron = navigator.userAgent.toLowerCase().includes('electron');
+        console.log(`[RasterPath] Debug: isElectron=${isElectron}, userAgent=${navigator.userAgent}, workerPool=${this.workerPool.length}, angles=${angles.length}`);
+
+        if (isElectron && this.workerPool.length > 0 && angles.length >= 4) {
+            console.log(`[RasterPath] Using batched GPU processing (Phase 2B)`);
+            return this._generateRadialToolpathBatched(
+                terrainTriangles, toolPositions, angles, xStep, zFloor,
+                gridStep, terrainBounds, toolRadius, xRotationStep, startTime
+            );
+        }
+
+        // Fall back to Phase 2A (parallel workers with GPU rotation) for Chrome
+        if (this.workerPool.length > 0 && angles.length >= 4) {
+            console.log(`[RasterPath] Falling back to Phase 2A (parallel workers with GPU rotation)`);
             return this._generateRadialToolpathParallel(
                 terrainTriangles, toolPositions, angles, xStep, zFloor,
                 gridStep, terrainBounds, toolRadius, xRotationStep, startTime
             );
         }
+
+        console.log(`[RasterPath] Falling back to sequential processing (no workers)`);
 
         // Process each rotation sequentially
         const scanlines = [];
@@ -412,6 +429,49 @@ export class RasterPath {
             pathData,
             numRotations: angles.length,
             pointsPerLine,
+            rotationStepDegrees: xRotationStep,
+            generationTime
+        };
+    }
+
+    /**
+     * Generate radial toolpath using batched GPU processing (Phase 2B)
+     * All rotations processed in a single GPU dispatch
+     */
+    async _generateRadialToolpathBatched(terrainTriangles, toolPositions, angles, xStep, zFloor, gridStep, terrainBounds, toolRadius, xRotationStep, startTime) {
+        // Send to worker for batched GPU processing
+        const result = await new Promise((resolve, reject) => {
+            const handler = (data) => resolve(data);
+
+            this._sendMessage(
+                'generate-batched-radial',
+                {
+                    triangles: new Float32Array(terrainTriangles),
+                    angles: new Float32Array(angles),
+                    toolPositions: new Float32Array(toolPositions),
+                    xStep,
+                    zFloor,
+                    gridStep,
+                    terrainBounds
+                },
+                'batched-radial-complete',
+                handler
+            );
+        });
+
+        const endTime = performance.now();
+        const generationTime = endTime - startTime;
+
+        console.log(`✅ Radial toolpath complete (batched GPU): ${angles.length} rotations × ${result.pointsPerLine} points in ${generationTime.toFixed(1)}ms`);
+
+        // Debug: Check first 10 values
+        const firstTen = Array.from(result.pathData.slice(0, 10)).map(v => v.toFixed(3)).join(', ');
+        console.log(`[RasterPath] First 10 pathData values: ${firstTen}`);
+
+        return {
+            pathData: result.pathData,
+            numRotations: result.numRotations,
+            pointsPerLine: result.pointsPerLine,
             rotationStepDegrees: xRotationStep,
             generationTime
         };
