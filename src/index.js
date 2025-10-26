@@ -201,15 +201,30 @@ export class RasterPath {
      * @param {number} yStep - Y-axis step size
      * @param {number} zFloor - Z floor value
      * @param {number} gridStep - Grid resolution
+     * @param {object} options - Optional settings {onProgress: (percent, info) => {}}
      * @returns {Promise<{pathData: Float32Array, numScanlines: number, pointsPerLine: number, generationTime: number}>}
      */
-    async generateToolpath(terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep) {
+    async generateToolpath(terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep, options = {}) {
         if (!this.isInitialized) {
             throw new Error('RasterPath not initialized. Call init() first.');
         }
 
+        const { onProgress } = options;
+
         return new Promise((resolve, reject) => {
+            // Set up progress handler if callback provided
+            if (onProgress) {
+                const progressHandler = (data) => {
+                    onProgress(data.percent, { current: data.current, total: data.total, layer: data.layer });
+                };
+                this.messageHandlers.set('toolpath-progress', progressHandler);
+            }
+
             const handler = (data) => {
+                // Clean up progress handler
+                if (onProgress) {
+                    this.messageHandlers.delete('toolpath-progress');
+                }
                 resolve(data);
             };
 
@@ -232,9 +247,10 @@ export class RasterPath {
      * @param {number} zFloor - Z floor value for out-of-bounds
      * @param {number} gridStep - Rasterization resolution
      * @param {object} terrainBounds - Terrain bounding box {min: {x,y,z}, max: {x,y,z}}
+     * @param {object} options - Optional settings {onProgress: (percent, info) => {}}
      * @returns {Promise<{pathData: Float32Array, numRotations: number, pointsPerLine: number, rotationStepDegrees: number, generationTime: number}>}
      */
-    async generateRadialToolpath(terrainTriangles, toolPositions, xRotationStep, xStep, zFloor, gridStep, terrainBounds) {
+    async generateRadialToolpath(terrainTriangles, toolPositions, xRotationStep, xStep, zFloor, gridStep, terrainBounds, options = {}) {
         if (!this.isInitialized) {
             throw new Error('RasterPath not initialized. Call init() first.');
         }
@@ -264,16 +280,24 @@ export class RasterPath {
             console.log(`[RasterPath] Using Phase 2A (parallel workers with GPU rotation)`);
             return this._generateRadialToolpathParallel(
                 terrainTriangles, toolPositions, angles, xStep, zFloor,
-                gridStep, terrainBounds, toolRadius, xRotationStep, startTime
+                gridStep, terrainBounds, toolRadius, xRotationStep, startTime, options
             );
         }
 
         console.log(`[RasterPath] Falling back to sequential processing (no workers)`);
 
+        const { onProgress } = options;
+
         // Process each rotation sequentially
         const scanlines = [];
         for (let i = 0; i < angles.length; i++) {
             const angle = angles[i];
+
+            // Report progress
+            if (onProgress) {
+                const percent = Math.round(((i + 1) / angles.length) * 100);
+                onProgress(percent, { current: i + 1, total: angles.length, angle });
+            }
 
             // 1. Rotate terrain triangles
             const rotatedTriangles = this._rotateTrianglesAroundX(terrainTriangles, angle);
@@ -349,8 +373,9 @@ export class RasterPath {
      * Generate radial toolpath using parallel workers
      * Internal method - called by generateRadialToolpath when worker pool is available
      */
-    async _generateRadialToolpathParallel(terrainTriangles, toolPositions, angles, xStep, zFloor, gridStep, terrainBounds, toolRadius, xRotationStep, startTime) {
+    async _generateRadialToolpathParallel(terrainTriangles, toolPositions, angles, xStep, zFloor, gridStep, terrainBounds, toolRadius, xRotationStep, startTime, options = {}) {
         const numWorkers = this.workerPool.length;
+        const { onProgress } = options;
 
         // Split angles across workers
         const anglesPerWorker = Math.ceil(angles.length / numWorkers);
@@ -373,6 +398,14 @@ export class RasterPath {
 
         console.log(`[RasterPath] Split ${angles.length} rotations across ${workerTasks.length} workers`);
 
+        // Shared progress tracker (aggregate across all workers)
+        let completedRotations = 0;
+        const progressCallback = onProgress ? (rotationsComplete) => {
+            completedRotations += rotationsComplete;
+            const percent = Math.round((completedRotations / angles.length) * 100);
+            onProgress(percent, { current: completedRotations, total: angles.length });
+        } : null;
+
         // Process all worker tasks in parallel
         const workerPromises = workerTasks.map(task =>
             this._processWorkerRotations(
@@ -385,7 +418,8 @@ export class RasterPath {
                 zFloor,
                 gridStep,
                 terrainBounds,
-                toolRadius
+                toolRadius,
+                progressCallback
             )
         );
 
@@ -424,7 +458,7 @@ export class RasterPath {
      * Process rotations for a single worker
      * Internal method - processes a subset of angles in one worker
      */
-    async _processWorkerRotations(workerState, workerIdx, terrainTriangles, toolPositions, angles, xStep, zFloor, gridStep, terrainBounds, toolRadius) {
+    async _processWorkerRotations(workerState, workerIdx, terrainTriangles, toolPositions, angles, xStep, zFloor, gridStep, terrainBounds, toolRadius, progressCallback = null) {
         const scanlines = [];
 
         for (let i = 0; i < angles.length; i++) {
@@ -483,6 +517,11 @@ export class RasterPath {
             });
 
             scanlines.push(scanlineData.scanline);
+
+            // Report progress for this completed rotation
+            if (progressCallback) {
+                progressCallback(1);  // Report 1 rotation completed
+            }
         }
 
         return { scanlines };

@@ -587,12 +587,32 @@ async function initWorkers() {
             case 'toolpath-complete':
                 console.log('WebGPU worker: toolpath complete');
                 handleToolpathComplete(data);
+                // Hide progress bar
+                const progressContainer = document.getElementById('progress-container');
+                if (progressContainer) {
+                    progressContainer.style.display = 'none';
+                }
+                break;
+
+            case 'toolpath-progress':
+                // Update progress bar
+                const progressFill = document.getElementById('progress-fill');
+                const progressText = document.getElementById('progress-text');
+                if (progressFill && progressText) {
+                    progressFill.style.width = `${data.percent}%`;
+                    progressText.textContent = `${data.percent}% (${data.current}/${data.total})`;
+                }
                 break;
 
             case 'error':
                 console.error('WebGPU worker error:', e.data.message);
                 updateStatus('Error: ' + e.data.message);
                 generateToolpathBtn.disabled = false;
+                // Hide progress bar on error
+                const errorProgressContainer = document.getElementById('progress-container');
+                if (errorProgressContainer) {
+                    errorProgressContainer.style.display = 'none';
+                }
                 break;
         }
     };
@@ -1779,6 +1799,14 @@ generateToolpathBtn.addEventListener('click', async () => {
         // Disable button during processing
         generateToolpathBtn.disabled = true;
 
+        // Show progress bar
+        const progressContainer = document.getElementById('progress-container');
+        const progressFill = document.getElementById('progress-fill');
+        const progressText = document.getElementById('progress-text');
+        progressContainer.style.display = 'block';
+        progressFill.style.width = '0%';
+        progressText.textContent = '0%';
+
         try {
             const xStep = parseInt(xStepInput.value);
             const xRotationStep = parseFloat(xRotationStepInput.value);
@@ -1815,7 +1843,7 @@ generateToolpathBtn.addEventListener('click', async () => {
                 console.log('Radial mode: no bounds override, using stlBounds');
             }
 
-            // Call radial toolpath generation
+            // Call radial toolpath generation with progress callback
             const result = await rasterPath.generateRadialToolpath(
                 terrainTriangles,
                 toolData.positions,
@@ -1823,8 +1851,17 @@ generateToolpathBtn.addEventListener('click', async () => {
                 xStep,
                 zFloor,
                 STEP_SIZE,
-                radialBounds
+                radialBounds,
+                {
+                    onProgress: (percent, info) => {
+                        progressFill.style.width = `${percent}%`;
+                        progressText.textContent = `${percent}% (${info.current}/${info.total})`;
+                    }
+                }
             );
+
+            // Hide progress bar
+            progressContainer.style.display = 'none';
 
             console.log('Radial toolpath complete:', result);
 
@@ -1844,6 +1881,7 @@ generateToolpathBtn.addEventListener('click', async () => {
             updateStatus('Error: ' + error.message);
             alert('Error generating radial toolpath: ' + error.message);
             generateToolpathBtn.disabled = false;
+            progressContainer.style.display = 'none';
         }
 
     } else {
@@ -1858,6 +1896,14 @@ generateToolpathBtn.addEventListener('click', async () => {
 
         // Disable button during processing
         generateToolpathBtn.disabled = true;
+
+        // Show progress bar
+        const progressContainer = document.getElementById('progress-container');
+        const progressFill = document.getElementById('progress-fill');
+        const progressText = document.getElementById('progress-text');
+        progressContainer.style.display = 'block';
+        progressFill.style.width = '0%';
+        progressText.textContent = '0%';
 
         try {
             const xStep = parseInt(xStepInput.value);
@@ -1886,6 +1932,7 @@ generateToolpathBtn.addEventListener('click', async () => {
             updateStatus('Error: ' + error.message);
             alert('Error generating planar toolpath: ' + error.message);
             generateToolpathBtn.disabled = false;
+            progressContainer.style.display = 'none';
         }
     }
 });

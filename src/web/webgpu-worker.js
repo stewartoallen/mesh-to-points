@@ -1539,6 +1539,18 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
         const tileStartTime = performance.now();
         console.log(`[WebGPU Worker] Processing tile ${i + 1}/${tiles.length}...`);
 
+        // Report progress
+        const percent = Math.round(((i + 1) / tiles.length) * 100);
+        self.postMessage({
+            type: 'toolpath-progress',
+            data: {
+                percent,
+                current: i + 1,
+                total: tiles.length,
+                layer: i + 1  // Using tile index as "layer" for consistency
+            }
+        });
+
         // Extract terrain sub-grid for this tile (terrain is ALWAYS dense)
         const tileMinGridX = Math.floor((tile.bounds.min.x - terrainBounds.min.x) / gridStep);
         const tileMaxGridX = Math.ceil((tile.bounds.max.x - terrainBounds.min.x) / gridStep);
