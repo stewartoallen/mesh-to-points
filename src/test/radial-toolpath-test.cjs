@@ -223,7 +223,6 @@ function createWindow() {
     mainWindow.webContents.on('console-message', (event, level, message) => {
         // Filter out verbose worker initialization messages to reduce output
         if (message.includes('Adapter limits') ||
-            message.includes('Batched radial shader') ||
             message.includes('Initialized (pipelines cached)') ||
             message.includes('Worker') && message.includes('initialized')) {
             return;
