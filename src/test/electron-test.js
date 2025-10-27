@@ -97,7 +97,7 @@ function createWindow() {
                 console.log('✓ Tool converted:', toolData.pointCount, 'points\\n');
 
                 // Import WebGPU module
-                const { initWebGPU, generateToolpathWebGPU } = await import('./toolpath-webgpu.js');
+                const { initWebGPU, generateToolpathWebGPU } = await import('./webgpu-toolpath.js');
 
                 // Initialize WebGPU
                 console.log('Initializing WebGPU...');
