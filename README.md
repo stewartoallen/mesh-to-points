@@ -88,14 +88,11 @@ Example (84×84×28mm model, 6,120 triangles):
 src/
   index.js                    # Main ESM export
   web/
-    webgpu-worker.js         # WebGPU worker (compute shaders)
-    toolpath-webgpu.js       # Toolpath generation logic
-    webgpu-rasterize.js      # Rasterization logic
+    webgpu-worker.js         # WebGPU worker (rasterization & toolpath)
     index.html               # Demo UI
     main.js                  # Demo app
     styles.css
   test/
-    electron-test.js         # WebGPU test harness
     generate-hemisphere.js   # Test fixture generator
 ```
 
