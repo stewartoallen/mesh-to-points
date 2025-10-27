@@ -213,11 +213,11 @@ function createWindow() {
                     worker.postMessage({
                         type: 'generate-toolpath',
                         data: {
-                            terrainPoints: terrainResult.positions,
-                            toolPoints: toolResult.positions,
+                            terrainPositions: terrainResult.positions,
+                            toolPositions: toolResult.positions,
                             xStep,
                             yStep,
-                            oobZ: zFloor,
+                            zFloor,
                             gridStep: stepSize,
                             terrainBounds: terrainResult.bounds
                         }
