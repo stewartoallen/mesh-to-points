@@ -7,6 +7,20 @@
   "exports": {
     ".": "./src/index.js"
   },
+  "files": [
+    "src/**/*.js",
+    "src/web/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-username/gs-raster-path.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/gs-raster-path/issues"
+  },
   "scripts": {
     "build": "npm run clean && npm run build:web",
     "build:web": "mkdir -p build && cp src/web/* build/ && cp src/index.js build/raster-path.js",
