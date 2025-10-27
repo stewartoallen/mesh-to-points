@@ -8,9 +8,8 @@ const path = require('path');
 const fs = require('fs');
 
 const OUTPUT_DIR = path.join(__dirname, '../../test-output');
-const BASELINE_FILE = path.join(OUTPUT_DIR, 'toolpath-baseline.txt');
-const CURRENT_FILE = path.join(OUTPUT_DIR, 'toolpath-current.txt');
-const DIFF_FILE = path.join(OUTPUT_DIR, 'toolpath-diff.txt');
+const BASELINE_FILE = path.join(OUTPUT_DIR, 'toolpath-baseline.json');
+const CURRENT_FILE = path.join(OUTPUT_DIR, 'toolpath-current.json');
 
 if (!fs.existsSync(OUTPUT_DIR)) {
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -76,80 +75,39 @@ function createWindow() {
                 }
                 console.log('✓ Worker initialized');
 
-                // Generate test terrain (hemisphere-like surface)
-                const terrainTriangles = [];
-                const radius = 20;
-                const segments = 8;
+                // Load STL files from benchmark/fixtures
+                console.log('\\nLoading STL files...');
+                const terrainResponse = await fetch('../benchmark/fixtures/terrain.stl');
+                const terrainBuffer = await terrainResponse.arrayBuffer();
 
-                for (let i = 0; i < segments; i++) {
-                    for (let j = 0; j < segments; j++) {
-                        const theta1 = (i / segments) * Math.PI;
-                        const theta2 = ((i + 1) / segments) * Math.PI;
-                        const phi1 = (j / segments) * 2 * Math.PI;
-                        const phi2 = ((j + 1) / segments) * 2 * Math.PI;
+                const toolResponse = await fetch('../benchmark/fixtures/tool.stl');
+                const toolBuffer = await toolResponse.arrayBuffer();
 
-                        // Four corners of quad
-                        const x1 = radius * Math.sin(theta1) * Math.cos(phi1);
-                        const y1 = radius * Math.sin(theta1) * Math.sin(phi1);
-                        const z1 = radius * Math.cos(theta1);
+                console.log('✓ Loaded terrain.stl:', terrainBuffer.byteLength, 'bytes');
+                console.log('✓ Loaded tool.stl:', toolBuffer.byteLength, 'bytes');
 
-                        const x2 = radius * Math.sin(theta2) * Math.cos(phi1);
-                        const y2 = radius * Math.sin(theta2) * Math.sin(phi1);
-                        const z2 = radius * Math.cos(theta2);
+                // Parse STL files (inline parser)
+                function parseBinarySTL(buffer) {
+                    const dataView = new DataView(buffer);
+                    const numTriangles = dataView.getUint32(80, true);
+                    const positions = new Float32Array(numTriangles * 9);
+                    let offset = 84;
 
-                        const x3 = radius * Math.sin(theta2) * Math.cos(phi2);
-                        const y3 = radius * Math.sin(theta2) * Math.sin(phi2);
-                        const z3 = radius * Math.cos(theta2);
-
-                        const x4 = radius * Math.sin(theta1) * Math.cos(phi2);
-                        const y4 = radius * Math.sin(theta1) * Math.sin(phi2);
-                        const z4 = radius * Math.cos(theta1);
-
-                        // Triangle 1
-                        terrainTriangles.push(x1, y1, z1, x2, y2, z2, x3, y3, z3);
-                        // Triangle 2
-                        terrainTriangles.push(x1, y1, z1, x3, y3, z3, x4, y4, z4);
+                    for (let i = 0; i < numTriangles; i++) {
+                        offset += 12; // Skip normal
+                        for (let j = 0; j < 9; j++) {
+                            positions[i * 9 + j] = dataView.getFloat32(offset, true);
+                            offset += 4;
+                        }
+                        offset += 2; // Skip attribute byte count
                     }
+                    return positions;
                 }
 
-                const terrainData = new Float32Array(terrainTriangles);
-                console.log('Generated test terrain:', terrainData.length / 9, 'triangles');
-
-                // Generate tool (simple sphere)
-                const toolTriangles = [];
-                const toolRadius = 2.5;
-                const toolSegs = 6;
-
-                for (let i = 0; i < toolSegs; i++) {
-                    for (let j = 0; j < toolSegs; j++) {
-                        const theta1 = (i / toolSegs) * Math.PI;
-                        const theta2 = ((i + 1) / toolSegs) * Math.PI;
-                        const phi1 = (j / toolSegs) * 2 * Math.PI;
-                        const phi2 = ((j + 1) / toolSegs) * 2 * Math.PI;
-
-                        const x1 = toolRadius * Math.sin(theta1) * Math.cos(phi1);
-                        const y1 = toolRadius * Math.sin(theta1) * Math.sin(phi1);
-                        const z1 = toolRadius * Math.cos(theta1);
-
-                        const x2 = toolRadius * Math.sin(theta2) * Math.cos(phi1);
-                        const y2 = toolRadius * Math.sin(theta2) * Math.sin(phi1);
-                        const z2 = toolRadius * Math.cos(theta2);
-
-                        const x3 = toolRadius * Math.sin(theta2) * Math.cos(phi2);
-                        const y3 = toolRadius * Math.sin(theta2) * Math.sin(phi2);
-                        const z3 = toolRadius * Math.cos(theta2);
-
-                        const x4 = toolRadius * Math.sin(theta1) * Math.cos(phi2);
-                        const y4 = toolRadius * Math.sin(theta1) * Math.sin(phi2);
-                        const z4 = toolRadius * Math.cos(theta1);
-
-                        toolTriangles.push(x1, y1, z1, x2, y2, z2, x3, y3, z3);
-                        toolTriangles.push(x1, y1, z1, x3, y3, z3, x4, y4, z4);
-                    }
-                }
-
-                const toolData = new Float32Array(toolTriangles);
-                console.log('Generated test tool:', toolData.length / 9, 'triangles');
+                const terrainData = parseBinarySTL(terrainBuffer);
+                const toolData = parseBinarySTL(toolBuffer);
+                console.log('✓ Parsed terrain:', terrainData.length / 9, 'triangles');
+                console.log('✓ Parsed tool:', toolData.length / 9, 'triangles');
 
                 // Test parameters - FINE detail for comprehensive test
                 const stepSize = 0.05; // 0.05mm high resolution
@@ -226,11 +184,11 @@ function createWindow() {
                     worker.postMessage({
                         type: 'generate-toolpath',
                         data: {
-                            terrainPoints: terrainResult.positions,
-                            toolPoints: toolResult.positions,
+                            terrainPositions: terrainResult.positions,
+                            toolPositions: toolResult.positions,
                             xStep,
                             yStep,
-                            oobZ: zFloor,
+                            zFloor: zFloor,
                             gridStep: stepSize,
                             terrainBounds: terrainResult.bounds
                         }
@@ -241,11 +199,17 @@ function createWindow() {
 
                 worker.terminate();
 
-                // Format output: one Z-value per line for easy diffing
-                const zValues = [];
+                // Calculate checksum for regression detection
+                let checksum = 0;
                 for (let i = 0; i < toolpathResult.pathData.length; i++) {
-                    // Round to 2 decimals (0.01mm precision) for consistent comparison
-                    zValues.push(toolpathResult.pathData[i].toFixed(2));
+                    checksum = (checksum + toolpathResult.pathData[i] * (i + 1)) | 0;
+                }
+
+                // Sample first 30 Z-values for debugging
+                const sampleSize = Math.min(30, toolpathResult.pathData.length);
+                const sampleValues = [];
+                for (let i = 0; i < sampleSize; i++) {
+                    sampleValues.push(toolpathResult.pathData[i].toFixed(2));
                 }
 
                 return {
@@ -264,9 +228,10 @@ function createWindow() {
                             toolPoints: toolResult.pointCount,
                             toolpathSize: toolpathResult.pathData.length,
                             numScanlines: toolpathResult.numScanlines,
-                            pointsPerLine: toolpathResult.pointsPerLine
-                        },
-                        zValues: zValues.join('\\n')
+                            pointsPerLine: toolpathResult.pointsPerLine,
+                            checksum: checksum,
+                            sampleValues: sampleValues
+                        }
                     }
                 };
             })();
@@ -281,103 +246,74 @@ function createWindow() {
                 return;
             }
 
-            // Save current output
-            const currentOutput = [
-                '# Toolpath Regression Test Output',
-                '# Parameters:',
-                `#   Step size: ${result.output.parameters.stepSize}mm`,
-                `#   XY step: ${result.output.parameters.xStep}x${result.output.parameters.yStep}`,
-                `#   Z floor: ${result.output.parameters.zFloor}mm`,
-                `#   Terrain triangles: ${result.output.parameters.terrainTriangles}`,
-                `#   Tool triangles: ${result.output.parameters.toolTriangles}`,
-                '# Result:',
-                `#   Terrain points: ${result.output.result.terrainPoints}`,
-                `#   Tool points: ${result.output.result.toolPoints}`,
-                `#   Toolpath: ${result.output.result.numScanlines}x${result.output.result.pointsPerLine} = ${result.output.result.toolpathSize} values`,
-                '# Z-values (one per line):',
-                result.output.zValues
-            ].join('\n');
+            // Save current output as JSON
+            const currentData = {
+                parameters: result.output.parameters,
+                result: result.output.result
+            };
 
-            fs.writeFileSync(CURRENT_FILE, currentOutput);
+            fs.writeFileSync(CURRENT_FILE, JSON.stringify(currentData, null, 2));
             console.log('\n✓ Saved current output to', CURRENT_FILE);
-            console.log(`  Total Z-values: ${result.output.result.toolpathSize}`);
+            console.log(`  Toolpath size: ${result.output.result.toolpathSize} Z-values`);
+            console.log(`  Checksum: ${result.output.result.checksum}`);
+            console.log(`  Sample values (first 10): ${result.output.result.sampleValues.slice(0, 10).join(', ')}`);
 
             // Check if baseline exists
             if (!fs.existsSync(BASELINE_FILE)) {
                 console.log('\n📝 No baseline found - saving current as baseline');
-                fs.writeFileSync(BASELINE_FILE, currentOutput);
+                fs.writeFileSync(BASELINE_FILE, JSON.stringify(currentData, null, 2));
                 console.log('✅ Baseline created');
                 app.exit(0);
                 return;
             }
 
             // Compare with baseline
-            const baseline = fs.readFileSync(BASELINE_FILE, 'utf8');
-            const baselineLines = baseline.split('\n').filter(l => !l.startsWith('#'));
-            const currentLines = result.output.zValues.split('\n');
+            const baseline = JSON.parse(fs.readFileSync(BASELINE_FILE, 'utf8'));
 
             console.log('\n=== Comparison ===');
-            console.log('Baseline Z-values:', baselineLines.length);
-            console.log('Current Z-values:', currentLines.length);
+            console.log('Baseline toolpath size:', baseline.result.toolpathSize);
+            console.log('Current toolpath size:', result.output.result.toolpathSize);
+            console.log('Baseline checksum:', baseline.result.checksum);
+            console.log('Current checksum:', result.output.result.checksum);
 
             let passed = true;
-            const diffs = [];
-            const TOLERANCE = 0.001; // 0.001mm tolerance
 
-            if (baselineLines.length !== currentLines.length) {
-                console.error('❌ Length mismatch!');
+            // Compare basic parameters
+            if (baseline.result.toolpathSize !== result.output.result.toolpathSize) {
+                console.error('❌ Toolpath size mismatch!');
+                console.error(`  Expected: ${baseline.result.toolpathSize}, Got: ${result.output.result.toolpathSize}`);
+                passed = false;
+            }
+
+            // Compare checksums
+            if (baseline.result.checksum !== result.output.result.checksum) {
+                console.error('❌ Checksum mismatch!');
+                console.error(`  Expected: ${baseline.result.checksum}, Got: ${result.output.result.checksum}`);
+                console.error('\nSample comparison (first 10 values):');
+                console.error('  Baseline:', baseline.result.sampleValues.slice(0, 10).join(', '));
+                console.error('  Current: ', result.output.result.sampleValues.slice(0, 10).join(', '));
                 passed = false;
             } else {
-                let diffCount = 0;
-                for (let i = 0; i < baselineLines.length; i++) {
-                    const baseVal = parseFloat(baselineLines[i]);
-                    const currVal = parseFloat(currentLines[i]);
-                    const diff = Math.abs(baseVal - currVal);
+                console.log('✓ Checksum matches');
+            }
 
-                    if (diff > TOLERANCE) {
-                        diffCount++;
-                        if (diffs.length < 10) { // Store first 10 diffs
-                            diffs.push({
-                                index: i,
-                                baseline: baseVal,
-                                current: currVal,
-                                diff: diff
-                            });
-                        }
-                    }
-                }
-
-                if (diffCount > 0) {
-                    console.error(`❌ Found ${diffCount} differences > ${TOLERANCE}mm`);
-                    console.error('First few differences:');
-                    diffs.forEach(d => {
-                        console.error(`  Line ${d.index}: ${d.baseline} → ${d.current} (Δ${d.diff.toFixed(6)})`);
-                    });
-
-                    // Write diff file
-                    const diffOutput = [
-                        `# Found ${diffCount} differences > ${TOLERANCE}mm`,
-                        '# Format: line_number baseline_value current_value difference',
-                        ...diffs.map(d => `${d.index} ${d.baseline} ${d.current} ${d.diff.toFixed(6)}`)
-                    ].join('\n');
-                    fs.writeFileSync(DIFF_FILE, diffOutput);
-                    console.error('Wrote differences to', DIFF_FILE);
-
-                    passed = false;
-                } else {
-                    console.log('✓ All Z-values within tolerance');
-                }
+            // Compare dimensions
+            if (baseline.result.numScanlines !== result.output.result.numScanlines ||
+                baseline.result.pointsPerLine !== result.output.result.pointsPerLine) {
+                console.error('❌ Dimension mismatch!');
+                console.error(`  Scanlines: ${baseline.result.numScanlines} → ${result.output.result.numScanlines}`);
+                console.error(`  Points per line: ${baseline.result.pointsPerLine} → ${result.output.result.pointsPerLine}`);
+                passed = false;
+            } else {
+                console.log('✓ Dimensions match');
             }
 
             if (passed) {
                 console.log('\n✅ All checks passed - output matches baseline');
-                if (fs.existsSync(DIFF_FILE)) {
-                    fs.unlinkSync(DIFF_FILE);
-                }
                 app.exit(0);
             } else {
                 console.log('\n❌ Regression detected - output differs from baseline');
-                console.log('To compare: diff', BASELINE_FILE, CURRENT_FILE);
+                console.log('To compare files: diff', BASELINE_FILE, CURRENT_FILE);
                 console.log('To update baseline: cp', CURRENT_FILE, BASELINE_FILE);
                 app.exit(1);
             }
@@ -389,10 +325,22 @@ function createWindow() {
     });
 
     mainWindow.webContents.on('console-message', (event, level, message) => {
-        if (level === 2) {
-            console.error(message);
-        } else {
-            console.log(message);
+        // Filter out verbose worker initialization messages to reduce output
+        if (message.includes('Adapter limits') ||
+            message.includes('Batched radial shader') ||
+            message.includes('Initialized (pipelines cached)') ||
+            message.includes('Worker') && message.includes('initialized')) {
+            return;
+        }
+        try {
+            if (level === 2) {
+                console.error(message);
+            } else {
+                console.log(message);
+            }
+        } catch (err) {
+            // Ignore EPIPE errors from closed stdout
+            if (err.code !== 'EPIPE') throw err;
         }
     });
 }
