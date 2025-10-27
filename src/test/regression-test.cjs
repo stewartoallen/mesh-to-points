@@ -64,26 +64,36 @@ function createWindow() {
                 }
                 console.log('✓ Worker initialized');
 
-                // Generate a simple test STL (pyramid)
-                const triangles = new Float32Array([
-                    // Base triangle 1
-                    -10, -10, 0,  10, -10, 0,  10, 10, 0,
-                    // Base triangle 2
-                    -10, -10, 0,  10, 10, 0,  -10, 10, 0,
-                    // Side 1
-                    -10, -10, 0,  0, 0, 10,  10, -10, 0,
-                    // Side 2
-                    10, -10, 0,  0, 0, 10,  10, 10, 0,
-                    // Side 3
-                    10, 10, 0,  0, 0, 10,  -10, 10, 0,
-                    // Side 4
-                    -10, 10, 0,  0, 0, 10,  -10, -10, 0,
-                ]);
+                // Load terrain STL from benchmark/fixtures
+                console.log('\\nLoading STL files...');
+                const terrainResponse = await fetch('../benchmark/fixtures/terrain.stl');
+                const terrainBuffer = await terrainResponse.arrayBuffer();
 
-                console.log('Generated test pyramid:', triangles.length / 9, 'triangles');
+                console.log(\`✓ Loaded terrain.stl: \${terrainBuffer.byteLength} bytes\`);
 
-                // Rasterize with specific parameters
-                const stepSize = 1.0;
+                // Parse STL (inline parser)
+                function parseBinarySTL(buffer) {
+                    const dataView = new DataView(buffer);
+                    const numTriangles = dataView.getUint32(80, true);
+                    const positions = new Float32Array(numTriangles * 9);
+                    let offset = 84;
+
+                    for (let i = 0; i < numTriangles; i++) {
+                        offset += 12; // Skip normal
+                        for (let j = 0; j < 9; j++) {
+                            positions[i * 9 + j] = dataView.getFloat32(offset, true);
+                            offset += 4;
+                        }
+                        offset += 2; // Skip attribute byte count
+                    }
+                    return positions;
+                }
+
+                const triangles = parseBinarySTL(terrainBuffer);
+                console.log('Parsed terrain:', triangles.length / 9, 'triangles');
+
+                // Rasterize with standard parameters (detail 0.05mm)
+                const stepSize = 0.05;
                 const filterMode = 0;
 
                 const result = await new Promise((resolve, reject) => {
@@ -115,7 +125,7 @@ function createWindow() {
                     parameters: {
                         stepSize,
                         filterMode,
-                        triangleCount: 6
+                        triangleCount: triangles.length / 9
                     },
                     result: {
                         pointCount: result.pointCount,

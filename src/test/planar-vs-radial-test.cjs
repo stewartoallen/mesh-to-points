@@ -38,108 +38,69 @@ function createWindow() {
                     await rasterPath.init();
                     console.log('✓ RasterPath initialized');
 
-                    // Generate simple cylinder
-                    const cylRadius = 20;
-                    const cylHeight = 30;
-                    const segments = 16;
+                    // Load STL files from benchmark/fixtures
+                    console.log('\\nLoading STL files...');
+                    const terrainResponse = await fetch('../benchmark/fixtures/terrain.stl');
+                    const terrainBuffer = await terrainResponse.arrayBuffer();
 
-                    const terrainTriangles = [];
-                    for (let i = 0; i < segments; i++) {
-                        const theta1 = (i / segments) * 2 * Math.PI;
-                        const theta2 = ((i + 1) / segments) * 2 * Math.PI;
+                    const toolResponse = await fetch('../benchmark/fixtures/tool.stl');
+                    const toolBuffer = await toolResponse.arrayBuffer();
 
-                        const x1 = cylRadius * Math.cos(theta1);
-                        const y1 = cylRadius * Math.sin(theta1);
-                        const x2 = cylRadius * Math.cos(theta2);
-                        const y2 = cylRadius * Math.sin(theta2);
+                    console.log(\`✓ Loaded terrain.stl: \${terrainBuffer.byteLength} bytes\`);
+                    console.log(\`✓ Loaded tool.stl: \${toolBuffer.byteLength} bytes\`);
 
-                        // Side face
-                        terrainTriangles.push(
-                            x1, y1, 0,
-                            x2, y2, 0,
-                            x1, y1, cylHeight
-                        );
-                        terrainTriangles.push(
-                            x2, y2, 0,
-                            x2, y2, cylHeight,
-                            x1, y1, cylHeight
-                        );
+                    // Parse STL files (inline parser)
+                    function parseBinarySTL(buffer) {
+                        const dataView = new DataView(buffer);
+                        const numTriangles = dataView.getUint32(80, true);
+                        const positions = new Float32Array(numTriangles * 9);
+                        let offset = 84;
 
-                        // Top cap
-                        terrainTriangles.push(
-                            0, 0, cylHeight,
-                            x1, y1, cylHeight,
-                            x2, y2, cylHeight
-                        );
-                    }
-
-                    const triangles = new Float32Array(terrainTriangles);
-                    console.log(\`✓ Generated cylinder: \${terrainTriangles.length/9} triangles\`);
-
-                    // Generate ball tool
-                    const toolRadius = 5;
-                    const toolSegments = 8;
-                    const toolTriangles = [];
-
-                    for (let i = 0; i < toolSegments; i++) {
-                        for (let j = 0; j < toolSegments; j++) {
-                            const theta1 = (i / toolSegments) * Math.PI;
-                            const theta2 = ((i + 1) / toolSegments) * Math.PI;
-                            const phi1 = (j / toolSegments) * 2 * Math.PI;
-                            const phi2 = ((j + 1) / toolSegments) * 2 * Math.PI;
-
-                            const x1 = toolRadius * Math.sin(theta1) * Math.cos(phi1);
-                            const y1 = toolRadius * Math.sin(theta1) * Math.sin(phi1);
-                            const z1 = toolRadius * Math.cos(theta1);
-
-                            const x2 = toolRadius * Math.sin(theta2) * Math.cos(phi1);
-                            const y2 = toolRadius * Math.sin(theta2) * Math.sin(phi1);
-                            const z2 = toolRadius * Math.cos(theta2);
-
-                            const x3 = toolRadius * Math.sin(theta2) * Math.cos(phi2);
-                            const y3 = toolRadius * Math.sin(theta2) * Math.sin(phi2);
-                            const z3 = toolRadius * Math.cos(theta2);
-
-                            const x4 = toolRadius * Math.sin(theta1) * Math.cos(phi2);
-                            const y4 = toolRadius * Math.sin(theta1) * Math.sin(phi2);
-                            const z4 = toolRadius * Math.cos(theta1);
-
-                            toolTriangles.push(x1, y1, z1, x2, y2, z2, x3, y3, z3);
-                            toolTriangles.push(x1, y1, z1, x3, y3, z3, x4, y4, z4);
+                        for (let i = 0; i < numTriangles; i++) {
+                            offset += 12; // Skip normal
+                            for (let j = 0; j < 9; j++) {
+                                positions[i * 9 + j] = dataView.getFloat32(offset, true);
+                                offset += 4;
+                            }
+                            offset += 2; // Skip attribute byte count
                         }
+                        return positions;
                     }
 
-                    const tool = new Float32Array(toolTriangles);
-                    const stepSize = 1.0;
-                    const toolResult = await rasterPath.rasterizeMesh(tool, stepSize, 1);
+                    const terrainTriangles = parseBinarySTL(terrainBuffer);
+                    const toolTriangles = parseBinarySTL(toolBuffer);
+                    console.log(\`✓ Parsed terrain: \${terrainTriangles.length/9} triangles\`);
+                    console.log(\`✓ Parsed tool: \${toolTriangles.length/9} triangles\`);
+
+                    // Rasterize with standard parameters (detail 0.05mm)
+                    const stepSize = 0.05;
+                    const terrainResult = await rasterPath.rasterizeMesh(terrainTriangles, stepSize, 0);
+                    console.log(\`✓ Terrain rasterized: \${terrainResult.pointCount} points\`);
+
+                    const toolResult = await rasterPath.rasterizeMesh(toolTriangles, stepSize, 1);
                     console.log(\`✓ Tool rasterized: \${toolResult.pointCount} points\`);
 
-                    // Test with padding: +50mm on X axis
-                    const paddedBounds = {
-                        min: { x: -70, y: -20, z: 0 },
-                        max: { x: 70, y: 20, z: cylHeight }
-                    };
-
-                    const xStep = 5;
-                    const yStep = 5;
+                    // Standard parameters: x,y step 1,1
+                    const xStep = 1;
+                    const yStep = 1;
                     const zFloor = -100;
 
                     console.log('\\n=== Generating Planar Toolpath ===');
                     const planarResult = await rasterPath.generatePlanarToolpath(
-                        triangles,
+                        terrainResult.positions,
                         toolResult.positions,
                         xStep,
                         yStep,
                         zFloor,
                         stepSize,
-                        paddedBounds
+                        { terrainBounds: terrainResult.bounds }
                     );
 
                     console.log(\`Points per line: \${planarResult.pointsPerLine}\`);
-                    console.log(\`Number of lines: \${planarResult.numLines}\`);
+                    console.log(\`Number of lines: \${planarResult.numScanlines}\`);
 
-                    // Extract middle line from planar (y=0 is at index numLines/2)
-                    const midLineIndex = Math.floor(planarResult.numLines / 2);
+                    // Extract middle line from planar (y=0 is at index numScanlines/2)
+                    const midLineIndex = Math.floor(planarResult.numScanlines / 2);
                     const planarMidline = Array.from(
                         planarResult.pathData.slice(
                             midLineIndex * planarResult.pointsPerLine,
@@ -151,13 +112,13 @@ function createWindow() {
 
                     console.log('\\n=== Generating Radial Toolpath (0° only) ===');
                     const radialResult = await rasterPath.generateRadialToolpath(
-                        triangles,
+                        terrainTriangles,
                         toolResult.positions,
                         360,  // Only one rotation at 0°
                         xStep,
                         zFloor,
                         stepSize,
-                        paddedBounds
+                        terrainResult.bounds
                     );
 
                     console.log(\`Points per line: \${radialResult.pointsPerLine}\`);
@@ -247,7 +208,19 @@ function createWindow() {
     });
 
     mainWindow.webContents.on('console-message', (event, level, message) => {
-        console.log('[Renderer]', message);
+        // Filter out verbose worker initialization messages to reduce output
+        if (message.includes('Adapter limits') ||
+            message.includes('Batched radial shader') ||
+            message.includes('Initialized (pipelines cached)') ||
+            message.includes('Worker') && message.includes('initialized')) {
+            return;
+        }
+        try {
+            console.log('[Renderer]', message);
+        } catch (err) {
+            // Ignore EPIPE errors from closed stdout
+            if (err.code !== 'EPIPE') throw err;
+        }
     });
 }
 

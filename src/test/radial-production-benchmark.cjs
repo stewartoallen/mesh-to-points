@@ -37,57 +37,39 @@ function createWindow() {
 
                     const { RasterPath } = await import('./raster-path.js');
 
-                    // Test 1: Sequential (disable worker pool)
-                    console.log('\\n--- Test 1: Sequential Processing ---');
-                    const rasterPathSeq = new RasterPath({ parallelWorkers: 0 });
-                    await rasterPathSeq.init();
-                    console.log('✓ RasterPath initialized (sequential mode)');
+                    // Load STL files from benchmark/fixtures
+                    console.log('\\nLoading STL files...');
+                    const terrainResponse = await fetch('../benchmark/fixtures/terrain.stl');
+                    const terrainBuffer = await terrainResponse.arrayBuffer();
 
-                    // Generate moderately complex terrain
-                    const terrainTriangles = [];
-                    const radius = 20;
-                    const height = 30;
-                    const radialSegments = 32; // More detailed than simple test
-                    const heightSegments = 16;
+                    const toolResponse = await fetch('../benchmark/fixtures/tool.stl');
+                    const toolBuffer = await toolResponse.arrayBuffer();
 
-                    // Generate a more complex surface (cone with ribs)
-                    for (let i = 0; i < radialSegments; i++) {
-                        const theta1 = (i / radialSegments) * 2 * Math.PI;
-                        const theta2 = ((i + 1) / radialSegments) * 2 * Math.PI;
+                    console.log(\`✓ Loaded terrain.stl: \${terrainBuffer.byteLength} bytes\`);
+                    console.log(\`✓ Loaded tool.stl: \${toolBuffer.byteLength} bytes\`);
 
-                        for (let j = 0; j < heightSegments; j++) {
-                            const h1 = (j / heightSegments) * height;
-                            const h2 = ((j + 1) / heightSegments) * height;
-                            const r1 = radius * (1 - j / heightSegments);
-                            const r2 = radius * (1 - (j + 1) / heightSegments);
+                    // Parse STL files (inline parser)
+                    function parseBinarySTL(buffer) {
+                        const dataView = new DataView(buffer);
+                        const numTriangles = dataView.getUint32(80, true);
+                        const positions = new Float32Array(numTriangles * 9);
+                        let offset = 84;
 
-                            // Add ribs for complexity
-                            const rib = (i % 4 === 0) ? 1.2 : 1.0;
-
-                            const x1a = r1 * Math.cos(theta1) * rib;
-                            const y1a = r1 * Math.sin(theta1) * rib;
-                            const x2a = r1 * Math.cos(theta2) * rib;
-                            const y2a = r1 * Math.sin(theta2) * rib;
-                            const x1b = r2 * Math.cos(theta1) * rib;
-                            const y1b = r2 * Math.sin(theta1) * rib;
-                            const x2b = r2 * Math.cos(theta2) * rib;
-                            const y2b = r2 * Math.sin(theta2) * rib;
-
-                            terrainTriangles.push(
-                                x1a, y1a, h1,
-                                x2a, y2a, h1,
-                                x1b, y1b, h2
-                            );
-                            terrainTriangles.push(
-                                x2a, y2a, h1,
-                                x2b, y2b, h2,
-                                x1b, y1b, h2
-                            );
+                        for (let i = 0; i < numTriangles; i++) {
+                            offset += 12; // Skip normal
+                            for (let j = 0; j < 9; j++) {
+                                positions[i * 9 + j] = dataView.getFloat32(offset, true);
+                                offset += 4;
+                            }
+                            offset += 2; // Skip attribute byte count
                         }
+                        return positions;
                     }
 
-                    const triangles = new Float32Array(terrainTriangles);
-                    console.log(\`✓ Generated terrain: \${terrainTriangles.length/9} triangles\`);
+                    const triangles = parseBinarySTL(terrainBuffer);
+                    const toolTriangles = parseBinarySTL(toolBuffer);
+                    console.log(\`✓ Parsed terrain: \${triangles.length/9} triangles\`);
+                    console.log(\`✓ Parsed tool: \${toolTriangles.length/9} triangles\`);
 
                     // Calculate terrain bounds
                     let minX = Infinity, minY = Infinity, minZ = Infinity;
@@ -105,48 +87,20 @@ function createWindow() {
                         max: { x: maxX, y: maxY, z: maxZ }
                     };
 
-                    // Generate ball tool
-                    const toolTriangles = [];
-                    const toolRadius = 3;
-                    const toolSegments = 8;
-
-                    for (let i = 0; i < toolSegments; i++) {
-                        for (let j = 0; j < toolSegments; j++) {
-                            const theta1 = (i / toolSegments) * Math.PI;
-                            const theta2 = ((i + 1) / toolSegments) * Math.PI;
-                            const phi1 = (j / toolSegments) * 2 * Math.PI;
-                            const phi2 = ((j + 1) / toolSegments) * 2 * Math.PI;
-
-                            const x1 = toolRadius * Math.sin(theta1) * Math.cos(phi1);
-                            const y1 = toolRadius * Math.sin(theta1) * Math.sin(phi1);
-                            const z1 = toolRadius * Math.cos(theta1);
-
-                            const x2 = toolRadius * Math.sin(theta2) * Math.cos(phi1);
-                            const y2 = toolRadius * Math.sin(theta2) * Math.sin(phi1);
-                            const z2 = toolRadius * Math.cos(theta2);
-
-                            const x3 = toolRadius * Math.sin(theta2) * Math.cos(phi2);
-                            const y3 = toolRadius * Math.sin(theta2) * Math.sin(phi2);
-                            const z3 = toolRadius * Math.cos(theta2);
-
-                            const x4 = toolRadius * Math.sin(theta1) * Math.cos(phi2);
-                            const y4 = toolRadius * Math.sin(theta1) * Math.sin(phi2);
-                            const z4 = toolRadius * Math.cos(theta1);
-
-                            toolTriangles.push(x1, y1, z1, x2, y2, z2, x3, y3, z3);
-                            toolTriangles.push(x1, y1, z1, x3, y3, z3, x4, y4, z4);
-                        }
-                    }
-
-                    const tool = new Float32Array(toolTriangles);
-                    const stepSize = 0.05; // Production detail level
-                    const toolResult = await rasterPathSeq.rasterizeMesh(tool, stepSize, 1);
-                    console.log(\`✓ Tool rasterized: \${toolResult.pointCount} points\`);
-
                     // Production settings
+                    const stepSize = 0.05; // 0.05mm detail level
                     const xRotationStep = 1;  // 1° steps = 360 rotations
                     const xStep = 1;          // Sample every grid point
                     const zFloor = 0;
+
+                    // Test 1: Sequential (disable worker pool)
+                    console.log('\\n--- Test 1: Sequential Processing ---');
+                    const rasterPathSeq = new RasterPath({ parallelWorkers: 0 });
+                    await rasterPathSeq.init();
+                    console.log('✓ RasterPath initialized (sequential mode)');
+
+                    const toolResult = await rasterPathSeq.rasterizeMesh(toolTriangles, stepSize, 1);
+                    console.log(\`✓ Tool rasterized: \${toolResult.pointCount} points\`);
 
                     console.log('Generating sequential radial toolpath...');
                     const seqStart = performance.now();
@@ -173,7 +127,7 @@ function createWindow() {
                     console.log('✓ RasterPath initialized with worker pool');
 
                     // Rasterize tool again for parallel instance
-                    const toolResultPar = await rasterPathPar.rasterizeMesh(tool, stepSize, 1);
+                    const toolResultPar = await rasterPathPar.rasterizeMesh(toolTriangles, stepSize, 1);
 
                     console.log('Generating parallel radial toolpath...');
                     const parStart = performance.now();
@@ -211,7 +165,7 @@ function createWindow() {
                         numRotations: seqResult.numRotations,
                         pointsPerLine: seqResult.pointsPerLine,
                         totalPoints: seqResult.pathData.length,
-                        triangles: terrainTriangles.length / 9
+                        triangles: triangles.length / 9
                     };
 
                 } catch (error) {
@@ -251,7 +205,19 @@ function createWindow() {
     });
 
     mainWindow.webContents.on('console-message', (event, level, message) => {
-        console.log('[Renderer]', message);
+        // Filter out verbose worker initialization messages to reduce output
+        if (message.includes('Adapter limits') ||
+            message.includes('Batched radial shader') ||
+            message.includes('Initialized (pipelines cached)') ||
+            message.includes('Worker') && message.includes('initialized')) {
+            return;
+        }
+        try {
+            console.log('[Renderer]', message);
+        } catch (err) {
+            // Ignore EPIPE errors from closed stdout
+            if (err.code !== 'EPIPE') throw err;
+        }
     });
 }
 

@@ -194,7 +194,7 @@ export class RasterPath {
     }
 
     /**
-     * Generate toolpath from terrain and tool meshes
+     * Generate planar toolpath from terrain and tool meshes
      * @param {Float32Array} terrainPositions - Terrain point cloud positions
      * @param {Float32Array} toolPositions - Tool point cloud positions
      * @param {number} xStep - X-axis step size
@@ -204,12 +204,12 @@ export class RasterPath {
      * @param {object} options - Optional settings {onProgress: (percent, info) => {}}
      * @returns {Promise<{pathData: Float32Array, numScanlines: number, pointsPerLine: number, generationTime: number}>}
      */
-    async generateToolpath(terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep, options = {}) {
+    async generatePlanarToolpath(terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep, options = {}) {
         if (!this.isInitialized) {
             throw new Error('RasterPath not initialized. Call init() first.');
         }
 
-        const { onProgress } = options;
+        const { onProgress, terrainBounds } = options;
 
         return new Promise((resolve, reject) => {
             // Set up progress handler if callback provided
@@ -230,7 +230,7 @@ export class RasterPath {
 
             this._sendMessage(
                 'generate-toolpath',
-                { terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep },
+                { terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep, terrainBounds },
                 'toolpath-complete',
                 handler
             );

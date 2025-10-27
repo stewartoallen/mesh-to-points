@@ -2094,9 +2094,9 @@ self.onmessage = async function(e) {
                 break;
 
             case 'generate-toolpath':
-                const { terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds } = data;
+                const { terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep, terrainBounds } = data;
                 const toolpathResult = await generateToolpath(
-                    terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds
+                    terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep, terrainBounds
                 );
                 self.postMessage({
                     type: 'toolpath-complete',

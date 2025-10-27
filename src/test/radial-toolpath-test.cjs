@@ -59,50 +59,39 @@ function createWindow() {
                     console.warn('Failed to initialize worker pool:', error);
                 }
 
-                // Generate test terrain: simple cone
-                // This is a good test for radial mode since it's rotationally symmetric
-                const terrainTriangles = [];
-                const coneRadius = 20;
-                const coneHeight = 30;
-                const segments = 16;
+                // Load STL files from benchmark/fixtures
+                console.log('\\nLoading STL files...');
+                const terrainResponse = await fetch('../benchmark/fixtures/terrain.stl');
+                const terrainBuffer = await terrainResponse.arrayBuffer();
 
-                // Generate cone triangles
-                for (let i = 0; i < segments; i++) {
-                    const theta1 = (i / segments) * 2 * Math.PI;
-                    const theta2 = ((i + 1) / segments) * 2 * Math.PI;
+                const toolResponse = await fetch('../benchmark/fixtures/tool.stl');
+                const toolBuffer = await toolResponse.arrayBuffer();
 
-                    // Bottom circle point 1
-                    const x1 = coneRadius * Math.cos(theta1);
-                    const y1 = coneRadius * Math.sin(theta1);
-                    const z1 = 0;
+                console.log(\`✓ Loaded terrain.stl: \${terrainBuffer.byteLength} bytes\`);
+                console.log(\`✓ Loaded tool.stl: \${toolBuffer.byteLength} bytes\`);
 
-                    // Bottom circle point 2
-                    const x2 = coneRadius * Math.cos(theta2);
-                    const y2 = coneRadius * Math.sin(theta2);
-                    const z2 = 0;
+                // Parse STL files (inline parser)
+                function parseBinarySTL(buffer) {
+                    const dataView = new DataView(buffer);
+                    const numTriangles = dataView.getUint32(80, true);
+                    const positions = new Float32Array(numTriangles * 9);
+                    let offset = 84;
 
-                    // Top center point
-                    const x3 = 0;
-                    const y3 = 0;
-                    const z3 = coneHeight;
-
-                    // Triangle forming side of cone
-                    terrainTriangles.push(
-                        x1, y1, z1,
-                        x2, y2, z2,
-                        x3, y3, z3
-                    );
-
-                    // Bottom cap triangle
-                    terrainTriangles.push(
-                        0, 0, 0,
-                        x1, y1, z1,
-                        x2, y2, z2
-                    );
+                    for (let i = 0; i < numTriangles; i++) {
+                        offset += 12; // Skip normal
+                        for (let j = 0; j < 9; j++) {
+                            positions[i * 9 + j] = dataView.getFloat32(offset, true);
+                            offset += 4;
+                        }
+                        offset += 2; // Skip attribute byte count
+                    }
+                    return positions;
                 }
 
-                const triangles = new Float32Array(terrainTriangles);
-                console.log(\`✓ Generated cone: \${terrainTriangles.length/9} triangles\`);
+                const triangles = parseBinarySTL(terrainBuffer);
+                const toolTriangles = parseBinarySTL(toolBuffer);
+                console.log(\`✓ Parsed terrain: \${triangles.length/9} triangles\`);
+                console.log(\`✓ Parsed tool: \${toolTriangles.length/9} triangles\`);
 
                 // Calculate terrain bounds
                 let minX = Infinity, minY = Infinity, minZ = Infinity;
@@ -121,58 +110,14 @@ function createWindow() {
                 };
                 console.log('✓ Terrain bounds:', terrainBounds);
 
-                // Generate simple ball tool (sphere)
-                const toolTriangles = [];
-                const toolRadius = 5;
-                const toolSegments = 8;
-
-                for (let i = 0; i < toolSegments; i++) {
-                    for (let j = 0; j < toolSegments; j++) {
-                        const theta1 = (i / toolSegments) * Math.PI;
-                        const theta2 = ((i + 1) / toolSegments) * Math.PI;
-                        const phi1 = (j / toolSegments) * 2 * Math.PI;
-                        const phi2 = ((j + 1) / toolSegments) * 2 * Math.PI;
-
-                        const x1 = toolRadius * Math.sin(theta1) * Math.cos(phi1);
-                        const y1 = toolRadius * Math.sin(theta1) * Math.sin(phi1);
-                        const z1 = toolRadius * Math.cos(theta1);
-
-                        const x2 = toolRadius * Math.sin(theta2) * Math.cos(phi1);
-                        const y2 = toolRadius * Math.sin(theta2) * Math.sin(phi1);
-                        const z2 = toolRadius * Math.cos(theta2);
-
-                        const x3 = toolRadius * Math.sin(theta2) * Math.cos(phi2);
-                        const y3 = toolRadius * Math.sin(theta2) * Math.sin(phi2);
-                        const z3 = toolRadius * Math.cos(theta2);
-
-                        const x4 = toolRadius * Math.sin(theta1) * Math.cos(phi2);
-                        const y4 = toolRadius * Math.sin(theta1) * Math.sin(phi2);
-                        const z4 = toolRadius * Math.cos(theta1);
-
-                        toolTriangles.push(
-                            x1, y1, z1,
-                            x2, y2, z2,
-                            x3, y3, z3
-                        );
-                        toolTriangles.push(
-                            x1, y1, z1,
-                            x3, y3, z3,
-                            x4, y4, z4
-                        );
-                    }
-                }
-
-                const tool = new Float32Array(toolTriangles);
-                console.log(\`✓ Generated tool: \${toolTriangles.length/9} triangles\`);
-
-                // Rasterize tool
-                const stepSize = 1.0; // 1mm grid
-                const toolResult = await rasterPath.rasterizeMesh(tool, stepSize, 1); // filterMode=1 for min Z (tool)
+                // Rasterize tool with standard parameters
+                const stepSize = 0.05; // 0.05mm detail
+                const toolResult = await rasterPath.rasterizeMesh(toolTriangles, stepSize, 1); // filterMode=1 for min Z (tool)
                 console.log(\`✓ Tool rasterized: \${toolResult.pointCount} points\`);
 
-                // Generate radial toolpath
-                const xRotationStep = 30; // degrees (12 rotations for 360°)
-                const xStep = 5; // sample every 5 grid points along X
+                // Generate radial toolpath with standard parameters
+                const xRotationStep = 1; // 1 degree (360 rotations for full circle)
+                const xStep = 1; // sample every grid point along X
                 const zFloor = -50;
 
                 console.log('Generating radial toolpath...');
@@ -276,7 +221,19 @@ function createWindow() {
     });
 
     mainWindow.webContents.on('console-message', (event, level, message) => {
-        console.log(`[Renderer]`, message);
+        // Filter out verbose worker initialization messages to reduce output
+        if (message.includes('Adapter limits') ||
+            message.includes('Batched radial shader') ||
+            message.includes('Initialized (pipelines cached)') ||
+            message.includes('Worker') && message.includes('initialized')) {
+            return;
+        }
+        try {
+            console.log('[Renderer]', message);
+        } catch (err) {
+            // Ignore EPIPE errors from closed stdout
+            if (err.code !== 'EPIPE') throw err;
+        }
     });
 }
 

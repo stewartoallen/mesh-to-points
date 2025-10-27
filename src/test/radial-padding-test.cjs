@@ -39,103 +39,78 @@ function createWindow() {
                     await rasterPath.init();
                     console.log('✓ RasterPath initialized');
 
-                    // Generate simple cylinder
-                    const cylRadius = 20;
-                    const cylHeight = 30;
-                    const segments = 16;
+                    // Load STL files from benchmark/fixtures
+                    console.log('\\nLoading STL files...');
+                    const terrainResponse = await fetch('../benchmark/fixtures/terrain.stl');
+                    const terrainBuffer = await terrainResponse.arrayBuffer();
 
-                    const terrainTriangles = [];
-                    for (let i = 0; i < segments; i++) {
-                        const theta1 = (i / segments) * 2 * Math.PI;
-                        const theta2 = ((i + 1) / segments) * 2 * Math.PI;
+                    const toolResponse = await fetch('../benchmark/fixtures/tool.stl');
+                    const toolBuffer = await toolResponse.arrayBuffer();
 
-                        const x1 = cylRadius * Math.cos(theta1);
-                        const y1 = cylRadius * Math.sin(theta1);
-                        const x2 = cylRadius * Math.cos(theta2);
-                        const y2 = cylRadius * Math.sin(theta2);
+                    console.log(\`✓ Loaded terrain.stl: \${terrainBuffer.byteLength} bytes\`);
+                    console.log(\`✓ Loaded tool.stl: \${toolBuffer.byteLength} bytes\`);
 
-                        // Side face
-                        terrainTriangles.push(
-                            x1, y1, 0,
-                            x2, y2, 0,
-                            x1, y1, cylHeight
-                        );
-                        terrainTriangles.push(
-                            x2, y2, 0,
-                            x2, y2, cylHeight,
-                            x1, y1, cylHeight
-                        );
+                    // Parse STL files (inline parser)
+                    function parseBinarySTL(buffer) {
+                        const dataView = new DataView(buffer);
+                        const numTriangles = dataView.getUint32(80, true);
+                        const positions = new Float32Array(numTriangles * 9);
+                        let offset = 84;
 
-                        // Top cap
-                        terrainTriangles.push(
-                            0, 0, cylHeight,
-                            x1, y1, cylHeight,
-                            x2, y2, cylHeight
-                        );
-                    }
-
-                    const triangles = new Float32Array(terrainTriangles);
-                    console.log(\`✓ Generated cylinder: \${terrainTriangles.length/9} triangles\`);
-
-                    // Generate ball tool
-                    const toolRadius = 5;
-                    const toolSegments = 8;
-                    const toolTriangles = [];
-
-                    for (let i = 0; i < toolSegments; i++) {
-                        for (let j = 0; j < toolSegments; j++) {
-                            const theta1 = (i / toolSegments) * Math.PI;
-                            const theta2 = ((i + 1) / toolSegments) * Math.PI;
-                            const phi1 = (j / toolSegments) * 2 * Math.PI;
-                            const phi2 = ((j + 1) / toolSegments) * 2 * Math.PI;
-
-                            const x1 = toolRadius * Math.sin(theta1) * Math.cos(phi1);
-                            const y1 = toolRadius * Math.sin(theta1) * Math.sin(phi1);
-                            const z1 = toolRadius * Math.cos(theta1);
-
-                            const x2 = toolRadius * Math.sin(theta2) * Math.cos(phi1);
-                            const y2 = toolRadius * Math.sin(theta2) * Math.sin(phi1);
-                            const z2 = toolRadius * Math.cos(theta2);
-
-                            const x3 = toolRadius * Math.sin(theta2) * Math.cos(phi2);
-                            const y3 = toolRadius * Math.sin(theta2) * Math.sin(phi2);
-                            const z3 = toolRadius * Math.cos(theta2);
-
-                            const x4 = toolRadius * Math.sin(theta1) * Math.cos(phi2);
-                            const y4 = toolRadius * Math.sin(theta1) * Math.sin(phi2);
-                            const z4 = toolRadius * Math.cos(theta1);
-
-                            toolTriangles.push(x1, y1, z1, x2, y2, z2, x3, y3, z3);
-                            toolTriangles.push(x1, y1, z1, x3, y3, z3, x4, y4, z4);
+                        for (let i = 0; i < numTriangles; i++) {
+                            offset += 12; // Skip normal
+                            for (let j = 0; j < 9; j++) {
+                                positions[i * 9 + j] = dataView.getFloat32(offset, true);
+                                offset += 4;
+                            }
+                            offset += 2; // Skip attribute byte count
                         }
+                        return positions;
                     }
 
-                    const tool = new Float32Array(toolTriangles);
-                    const stepSize = 1.0;
-                    const toolResult = await rasterPath.rasterizeMesh(tool, stepSize, 1);
+                    const triangles = parseBinarySTL(terrainBuffer);
+                    const toolTriangles = parseBinarySTL(toolBuffer);
+                    console.log(\`✓ Parsed terrain: \${triangles.length/9} triangles\`);
+                    console.log(\`✓ Parsed tool: \${toolTriangles.length/9} triangles\`);
+
+                    // Rasterize tool with standard parameters
+                    const stepSize = 0.05; // 0.05mm detail
+                    const toolResult = await rasterPath.rasterizeMesh(toolTriangles, stepSize, 1);
                     console.log(\`✓ Tool rasterized: \${toolResult.pointCount} points\`);
 
-                    // Original bounds (centered)
+                    // Calculate terrain bounds
+                    let minX = Infinity, minY = Infinity, minZ = Infinity;
+                    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+                    for (let i = 0; i < triangles.length; i += 3) {
+                        minX = Math.min(minX, triangles[i]);
+                        maxX = Math.max(maxX, triangles[i]);
+                        minY = Math.min(minY, triangles[i + 1]);
+                        maxY = Math.max(maxY, triangles[i + 1]);
+                        minZ = Math.min(minZ, triangles[i + 2]);
+                        maxZ = Math.max(maxZ, triangles[i + 2]);
+                    }
+
+                    // Original bounds
                     const originalBounds = {
-                        min: { x: -cylRadius, y: -cylRadius, z: 0 },
-                        max: { x: cylRadius, y: cylRadius, z: cylHeight }
+                        min: { x: minX, y: minY, z: minZ },
+                        max: { x: maxX, y: maxY, z: maxZ }
                     };
 
-                    // Padded bounds (add 50mm to X axis as requested)
+                    // Padded bounds (add 10mm to X axis for testing)
                     const paddedBounds = {
-                        min: { x: originalBounds.min.x - 50, y: originalBounds.min.y, z: originalBounds.min.z },
-                        max: { x: originalBounds.max.x + 50, y: originalBounds.max.y, z: originalBounds.max.z }
+                        min: { x: originalBounds.min.x - 10, y: originalBounds.min.y, z: originalBounds.min.z },
+                        max: { x: originalBounds.max.x + 10, y: originalBounds.max.y, z: originalBounds.max.z }
                     };
 
                     console.log('\\n=== Test 1: Original Bounds ===');
                     console.log('X range:', originalBounds.min.x, 'to', originalBounds.max.x,
-                                '(width:', originalBounds.max.x - originalBounds.min.x, 'mm)');
+                                '(width:', (originalBounds.max.x - originalBounds.min.x).toFixed(2), 'mm)');
 
                     const result1 = await rasterPath.generateRadialToolpath(
                         triangles,
                         toolResult.positions,
-                        30,  // rotation step
-                        5,   // xStep
+                        1,  // 1 degree rotation step
+                        1,  // xStep every grid point
                         -100,
                         stepSize,
                         originalBounds
@@ -147,15 +122,15 @@ function createWindow() {
                     const nonFloorCount1 = firstLine1.filter(z => z > -99).length;
                     console.log('Non-floor points in first line:', nonFloorCount1);
 
-                    console.log('\\n=== Test 2: Padded Bounds (+50mm X on each side) ===');
+                    console.log('\\n=== Test 2: Padded Bounds (+10mm X on each side) ===');
                     console.log('X range:', paddedBounds.min.x, 'to', paddedBounds.max.x,
-                                '(width:', paddedBounds.max.x - paddedBounds.min.x, 'mm)');
+                                '(width:', (paddedBounds.max.x - paddedBounds.min.x).toFixed(2), 'mm)');
 
                     const result2 = await rasterPath.generateRadialToolpath(
                         triangles,
                         toolResult.positions,
-                        30,  // rotation step
-                        5,   // xStep
+                        1,  // 1 degree rotation step
+                        1,  // xStep every grid point
                         -100,
                         stepSize,
                         paddedBounds
@@ -171,7 +146,8 @@ function createWindow() {
                     console.log('Original points per line:', result1.pointsPerLine);
                     console.log('Padded points per line:', result2.pointsPerLine);
                     console.log('Difference:', result2.pointsPerLine - result1.pointsPerLine);
-                    console.log('Expected difference (100mm / 5 grid cells):', Math.floor(100 / stepSize / 5));
+                    const expectedIncrease = Math.floor(20 / stepSize / 1); // 20mm padding (10mm each side) / stepSize / xStep
+                    console.log('Expected difference (20mm / 0.05mm / 1 xStep):', expectedIncrease);
 
                     if (result2.pointsPerLine <= result1.pointsPerLine) {
                         return {
@@ -179,7 +155,6 @@ function createWindow() {
                         };
                     }
 
-                    const expectedIncrease = Math.floor(100 / stepSize / 5); // 100mm padding / stepSize / xStep
                     const actualIncrease = result2.pointsPerLine - result1.pointsPerLine;
 
                     console.log('\\n✅ Padding test PASSED');
@@ -228,7 +203,19 @@ function createWindow() {
     });
 
     mainWindow.webContents.on('console-message', (event, level, message) => {
-        console.log('[Renderer]', message);
+        // Filter out verbose worker initialization messages to reduce output
+        if (message.includes('Adapter limits') ||
+            message.includes('Batched radial shader') ||
+            message.includes('Initialized (pipelines cached)') ||
+            message.includes('Worker') && message.includes('initialized')) {
+            return;
+        }
+        try {
+            console.log('[Renderer]', message);
+        } catch (err) {
+            // Ignore EPIPE errors from closed stdout
+            if (err.code !== 'EPIPE') throw err;
+        }
     });
 }
 

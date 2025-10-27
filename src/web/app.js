@@ -1916,11 +1916,11 @@ generateToolpathBtn.addEventListener('click', async () => {
             webgpuWorker.postMessage({
                 type: 'generate-toolpath',
                 data: {
-                    terrainPoints: terrainData.positions,
-                    toolPoints: toolData.positions,
+                    terrainPositions: terrainData.positions,
+                    toolPositions: toolData.positions,
                     xStep,
                     yStep,
-                    oobZ: zFloor,
+                    zFloor: zFloor,
                     gridStep: STEP_SIZE,
                     terrainBounds: terrainData.bounds // Pass terrain bounds for correct coordinate system
                 }
